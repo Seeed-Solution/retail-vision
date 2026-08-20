@@ -23,7 +23,10 @@ build/
 # Capture and test media
 testdata/
 *.mp4
+# MQTT captures, which are throwaway. The contract fixtures are not captures —
+# they are the test inputs CI runs the validator against, so they stay tracked.
 *.jsonl
+!contracts/fixtures/*.jsonl
 
 # macOS
 .DS_Store
