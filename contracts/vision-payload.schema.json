@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "retail-vision VisionPayload",
+  "description": "One batched message per publish cycle on <installation>/retail-vision/results/<camera-id>.",
+  "type": "object",
+  "required": [
+    "timestamp",
+    "frame_width",
+    "frame_height",
+    "zone",
+    "persons"
+  ],
+  "properties": {
+    "timestamp": {
+      "type": "integer",
+      "description": "epoch milliseconds, shared by every person in the batch"
+    },
+    "frame_id": {
+      "type": "integer"
+    },
+    "frame_width": {
+      "type": "integer"
+    },
+    "frame_height": {
+      "type": "integer"
+    },
+    "fps": {
+      "type": "number"
+    },
+    "inference_time_ms": {
+      "type": "number"
+    },
+    "camera_id": {
+      "type": "string"
+    },
+    "source_backend": {
+      "type": "string",
+      "description": "gstreamer_mpp = hardware decode, gstreamer_soft = CPU fallback"
+    },
+    "zone": {
+      "type": "object",
+      "required": [
+        "occupancy_count",
+        "browsing_count",
+        "engaged_count",
+        "assist_count",
+        "peak_customer",
+        "avg_dwell_time",
+        "avg_engagement_time",
+        "avg_velocity",
+        "entry_count",
+        "exit_count"
+      ],
+      "properties": {
+        "occupancy_count": {
+          "type": "integer"
+        },
+        "browsing_count": {
+          "type": "integer"
+        },
+        "engaged_count": {
+          "type": "integer"
+        },
+        "assist_count": {
+          "type": "integer"
+        },
+        "peak_customer": {
+          "type": "integer"
+        },
+        "avg_dwell_time": {
+          "type": "number"
+        },
+        "avg_engagement_time": {
+          "type": "number"
+        },
+        "avg_velocity": {
+          "type": "number"
+        },
+        "entry_count": {
+          "type": "integer"
+        },
+        "exit_count": {
+          "type": "integer"
+        }
+      }
+    },
+    "persons": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "slot",
+          "track_id",
+          "state",
+          "cx_pct",
+          "cy_pct",
+          "dwell_duration",
+          "confidence",
+          "bbox",
+          "velocity"
+        ],
+        "properties": {
+          "slot": {
+            "type": "integer",
+            "minimum": 0,
+            "title": "index of this person within THIS message's persons array",
+            "description": "Batch index, starting at 0 and dense: persons[i].slot MUST equal i. It is the disambiguating key for the batch, because every person in one message shares the single top-level `timestamp` -- a time-series store keyed only on (topic, timestamp) collapses all people in a frame into one row. Do NOT substitute track_id here. The whole point of slot is that its cardinality is bounded by the number of people visible in a single frame (typically <20), whereas track_id increases monotonically for the life of the deployment and would make the tag set grow without limit. track_id is still published as its own field for identity across messages; it just must not be used as the batch key."
+          },
+          "track_id": {
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "transient",
+              "dwelling",
+              "engaged",
+              "assistance"
+            ]
+          },
+          "cx_pct": {
+            "type": "number",
+            "description": "centre x as percent of frame width"
+          },
+          "cy_pct": {
+            "type": "number"
+          },
+          "dwell_duration": {
+            "type": "number"
+          },
+          "confidence": {
+            "type": "number"
+          },
+          "bbox": {
+            "type": "object",
+            "required": [
+              "x",
+              "y",
+              "w",
+              "h"
+            ],
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "w": {
+                "type": "number"
+              },
+              "h": {
+                "type": "number"
+              }
+            }
+          },
+          "velocity": {
+            "type": "object",
+            "required": [
+              "vx",
+              "vy",
+              "speed_m_s"
+            ],
+            "properties": {
+              "vx": {
+                "type": "number"
+              },
+              "vy": {
+                "type": "number"
+              },
+              "speed_m_s": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      },
+      "description": "Everyone visible in the frame this message summarises. One batched message per publish cycle, never one message per person: per-person publishing makes the broker carry people x cameras x fps messages per second."
+    }
+  }
+}
