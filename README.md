@@ -217,6 +217,20 @@ your use, Ultralytics sells a commercial licence, or you can retrain and convert
 model whose licence you control — the backends take any detector that produces
 person boxes, so substituting one touches only the model file and the config.
 
+## Before you expose it
+
+The backend ships with working defaults so `docker compose up` produces a running
+dashboard, and those defaults are **public knowledge because they are in this
+repository**: the InfluxDB admin token is `recamera-heatmap-token`, the Grafana
+login is `admin` / `admin`, and the MQTT broker allows anonymous connections.
+
+That is fine on a closed lab network and not fine anywhere else. Before the
+backend is reachable from anything you do not control, change the token
+(`backend/docker-compose.yml`, `backend/telegraf/telegraf.conf`,
+`backend/grafana/provisioning/datasources/influxdb.yml`, and the `INFLUX_TOKEN`
+passed to the heatmap service), set a real Grafana password, and put credentials
+on the broker.
+
 ## Known constraints
 
 - **A Hailo-8 runs one application at a time.** HailoRT hands the physical device to

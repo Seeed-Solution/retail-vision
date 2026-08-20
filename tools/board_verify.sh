@@ -29,7 +29,7 @@ if [ "${START_RTSP:-0}" = "1" ]; then
 fi
 echo "--- 8554 listener before publishing ---"; ss -ltn 2>/dev/null | grep 8554 || echo "(none)"
 # Prefer a host ffmpeg: pulling the mediamtx ffmpeg-flavoured image costs
-# 266 MB, and cat-remote has under 2 GB free.
+# 266 MB, and these boards are routinely down to their last gigabyte.
 if command -v ffmpeg >/dev/null 2>&1; then
   echo "(publishing with host ffmpeg)"
   nohup ffmpeg -re -stream_loop -1 -i "$VIDEO" -an -c copy -f rtsp \
