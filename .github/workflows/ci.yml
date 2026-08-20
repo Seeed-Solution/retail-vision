@@ -1,0 +1,96 @@
+name: ci
+
+# Everything here runs on a plain CPU runner. The accelerator backends need
+# hardware that GitHub does not have, so what CI can honestly check is the part
+# that is shared: the contract, and the logic that sits above detect().
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  core-py:
+    name: core-py (shared logic)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install numpy pytest
+
+      # The tracker fixture is the cross-implementation check: 330 frames with
+      # expectations derived from the C++ authority rather than recorded from
+      # this port, so a drift in either direction fails here.
+      - name: Behaviour fixture
+        run: python -m pytest core-py/retail_core/tests -q
+
+      # A backend that imports the wrong thing at module scope breaks every
+      # board at once. The RK image carries no OpenCV at all, so the cv2 video
+      # source has to stay importable without it.
+      - name: retail_core imports without OpenCV
+        run: |
+          cd core-py
+          python - <<'PY'
+          import sys, importlib
+          sys.modules["cv2"] = None          # any import cv2 now raises
+          import retail_core.video as video
+          print("sources:", video.available_sources())
+          assert "gstreamer_soft" in video.available_sources()
+          PY
+
+  core-cpp:
+    name: core-cpp (shared logic)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Compiles and runs the same object code the boards run. Covers the
+      # letterbox correction, which is where a coordinate bug hides silently:
+      # it produces plausible-looking boxes that are simply in the wrong place.
+      - name: Self-test
+        run: |
+          c++ -std=c++17 -Wall -Icore-cpp tools/core_selftest.cpp core-cpp/*.cpp -o /tmp/core_selftest
+          /tmp/core_selftest
+
+  contract:
+    name: contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Schema parses
+        run: python -c "import json; json.load(open('contracts/vision-payload.schema.json'))"
+
+      # Both directions: a validator that accepts everything passes the first
+      # check and is worthless. The invalid fixture holds one wrong slot index
+      # and one unknown dwell state, and the run must fail on it.
+      - name: Validator accepts conforming payloads
+        run: python3 contracts/validate_payload.py contracts/fixtures/valid.jsonl
+
+      - name: Validator rejects broken payloads
+        run: |
+          if python3 contracts/validate_payload.py contracts/fixtures/invalid.jsonl; then
+            echo "::error::validator accepted payloads it should have rejected"
+            exit 1
+          fi
+
+  compose:
+    name: compose files parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Catches a broken mount path or a stray tab before someone discovers it
+      # on a board with no screen attached.
+      - name: docker compose config
+        run: |
+          for f in backend/docker-compose.yml boards/*/docker-compose.yml; do
+            echo "--- $f"
+            STREAMS=placeholder docker compose -f "$f" config -q
+          done

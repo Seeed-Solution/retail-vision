@@ -2,6 +2,7 @@
 
 **Retail footfall analytics that runs the same tracking code on Hailo-8, Jetson, Rockchip NPU and reCamera.**
 
+[![CI](https://github.com/Seeed-Solution/retail-vision/actions/workflows/ci.yml/badge.svg)](https://github.com/Seeed-Solution/retail-vision/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Hailo-8](https://img.shields.io/badge/Hailo--8-verified-success)](#verified-on-hardware)
 [![Jetson](https://img.shields.io/badge/Jetson%20Orin-verified-success)](#verified-on-hardware)
