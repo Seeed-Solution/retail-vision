@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# C++ build output
+build/
+*.o
+*.a
+*.so
+
+# Model weights are not distributed with this repository — each carries its own
+# licence and is fetched at deploy time. See "Models and their licences".
+*.rknn
+*.hef
+*.engine
+*.cvimodel
+*.pt
+*.onnx
+
+# Capture and test media
+testdata/
+*.mp4
+*.jsonl
+
+# macOS
+.DS_Store
