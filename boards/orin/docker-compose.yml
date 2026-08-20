@@ -1,0 +1,43 @@
+services:
+  retail-vision:
+    image: ${RETAIL_ORIN_IMAGE:-retail-vision-orin:0.1.0}
+    container_name: retail-vision-orin
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.jetson
+      args:
+        BASE_IMAGE: ${JETSON_BASE_IMAGE:-docker.m.daocloud.io/library/ubuntu:22.04}
+    runtime: nvidia
+    restart: unless-stopped
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu/tegra
+    volumes:
+      # A TensorRT plan is tied to the GPU arch and to the exact TensorRT build
+      # that produced it, so the host CUDA/TensorRT stack is mounted rather than
+      # baked in -- same reason librknnrt.so is mounted on the RK boards. The
+      # image itself carries no CUDA/TensorRT at all; these mounts are the
+      # entire inference runtime.
+      - /usr/local/cuda:/usr/local/cuda:ro
+      - /usr/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu
+      - /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra
+      - /usr/lib/python3.10/dist-packages/tensorrt:/usr/lib/python3.10/dist-packages/tensorrt:ro
+      - /usr/lib/python3.10/dist-packages/tensorrt_lean:/usr/lib/python3.10/dist-packages/tensorrt_lean:ro
+      - /usr/lib/python3.10/dist-packages/tensorrt_dispatch:/usr/lib/python3.10/dist-packages/tensorrt_dispatch:ro
+      - orin-models:/models:ro
+      - ./config:/config:ro
+    command: ["--config", "/config/config.json"]
+    networks:
+      - analytics
+
+volumes:
+  # Holds the .engine built on this board. Named so an engine produced by an
+  # earlier deployment is reused instead of rebuilt on every fresh stack.
+  orin-models:
+    name: ${ORIN_MODELS_VOLUME:-retail-vision-orin-models}
+
+networks:
+  analytics:
+    name: ${ANALYTICS_NETWORK:-recamera-heatmap-network}
+    external: true

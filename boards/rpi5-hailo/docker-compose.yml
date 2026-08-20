@@ -1,0 +1,56 @@
+services:
+  builder:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.hailo-build
+    image: retail-vision-hailo-builder:local
+    profiles: ["build"]
+    volumes:
+      - ../..:/src
+      - /usr/include/hailo:/usr/include/hailo:ro
+      - /usr/include/gstreamer-1.0/gst/hailo:/usr/include/gstreamer-1.0/gst/hailo:ro
+      - /usr/lib/cmake/HailoRT:/usr/lib/cmake/HailoRT:ro
+      - /usr/lib/libhailort.so:/usr/lib/libhailort.so:ro
+      - /usr/lib/libhailort.so.4.21.0:/usr/lib/libhailort.so.4.21.0:ro
+      - /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgsthailo.so:/usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgsthailo.so:ro
+
+  retail-vision:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile.hailo
+    image: ${RETAIL_VISION_IMAGE:-retail-vision-hailo:0.1.0}
+    container_name: retail-vision-hailo
+    network_mode: host
+    restart: unless-stopped
+    devices:
+      - /dev/hailo0:/dev/hailo0
+    environment:
+      HEF_PATH: /models/yolov8n.hef
+      # Semicolon-separated camera-id|url entries. url may also be file:// or
+      # test:// for bring-up.
+      STREAMS: "${STREAMS:-cam-01|rtsp://127.0.0.1:8554/retail}"
+      RTSP_LATENCY_MS: ${RTSP_LATENCY_MS:-100}
+      INSTALLATION_ID: ${INSTALLATION_ID:-store-01}
+      MQTT_HOST: ${MQTT_HOST:-127.0.0.1}
+      MQTT_PORT: ${MQTT_PORT:-1883}
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      # One batched message per cycle, per camera.
+      PUBLISH_HZ: ${PUBLISH_HZ:-1.0}
+      SCORE_THRESHOLD: ${SCORE_THRESHOLD:-0.4}
+      DWELL_SPEED_THRESHOLD: ${DWELL_SPEED_THRESHOLD:-10.0}
+      DWELL_MIN_DURATION: ${DWELL_MIN_DURATION:-1.5}
+      DWELL_ASSISTANCE_THRESHOLD: ${DWELL_ASSISTANCE_THRESHOLD:-20.0}
+      ZONE_WINDOW_SEC: ${ZONE_WINDOW_SEC:-60}
+      BENCHMARK_SECONDS: ${BENCHMARK_SECONDS:-0}
+    volumes:
+      - ./models:/models:ro
+      # ABI lock: hailonet plugin + HailoRT user library come from the host and
+      # must match the host's hailo_pci driver (4.21.0 on this board).
+      - /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgsthailo.so:/usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgsthailo.so:ro
+      - /usr/lib/libhailort.so.4.21.0:/usr/lib/libhailort.so.4.21.0:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test -c /dev/hailo0 && test -r ${HEF_PATH:-/models/yolov8n.hef}"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

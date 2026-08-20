@@ -1,0 +1,40 @@
+services:
+  retail-vision:
+    image: ${RETAIL_RK_IMAGE:-retail-vision-rknn:0.1.0}
+    container_name: retail-vision-rk3576
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-docker.m.daocloud.io/library/python:3.11-slim-bookworm}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+      network: host
+    network_mode: host
+    privileged: true
+    restart: unless-stopped
+    devices:
+      - "/dev/dri:/dev/dri"
+    # The GStreamer plugin registry is cached under $HOME/.cache. A cache
+    # written before the host MPP plugin was mounted keeps mppvideodec
+    # invisible, and the app silently falls back to CPU decode with no error
+    # anywhere. tmpfs forces a rescan every start.
+    tmpfs:
+      - /root/.cache
+    volumes:
+      - /lib/aarch64-linux-gnu/gstreamer-1.0/libgstrockchipmpp.so:/lib/aarch64-linux-gnu/gstreamer-1.0/libgstrockchipmpp.so:ro
+      - /lib/aarch64-linux-gnu/gstreamer-1.0/libgstvideoparsersbad.so:/lib/aarch64-linux-gnu/gstreamer-1.0/libgstvideoparsersbad.so:ro
+      - /lib/aarch64-linux-gnu/libgstcodecparsers-1.0.so.0:/lib/aarch64-linux-gnu/libgstcodecparsers-1.0.so.0:ro
+      - /lib/aarch64-linux-gnu/librockchip_mpp.so.1:/lib/aarch64-linux-gnu/librockchip_mpp.so.1:ro
+      - /lib/aarch64-linux-gnu/librga.so.2:/lib/aarch64-linux-gnu/librga.so.2:ro
+      # User-space NPU library must match the host kernel driver, so it is
+      # mounted rather than baked into the image.
+      - /usr/lib/librknnrt.so:/usr/lib/librknnrt.so:ro
+      # Only the packages actually imported are exposed. Mounting the whole
+      # host dist-packages (or mounting onto the container's site-packages)
+      # shadows the image's own numpy with the host build.
+      - /usr/lib/python3/dist-packages/rknnlite:/usr/local/lib/python3.11/site-packages/rknnlite:ro
+      - /usr/lib/python3/dist-packages/ruamel:/usr/local/lib/python3.11/site-packages/ruamel:ro
+      - /usr/lib/python3/dist-packages/psutil:/usr/local/lib/python3.11/site-packages/psutil:ro
+      - ./config:/config:ro
+      - ./models:/models:ro
+    command: ["--config", "/config/config.json"]

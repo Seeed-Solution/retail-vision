@@ -1,0 +1,47 @@
+{
+  "installation": "store-demo",
+  "backend": "rknn",
+  "model_path": "/models/yolo11n_pose_rawhead_fp16.rk3588.rknn",
+  "input_size": 640,
+  "score_threshold": 0.35,
+  "nms_threshold": 0.45,
+  "publish_hz": 1.0,
+  "window_duration": 60.0,
+  "frame_width": 1280,
+  "frame_height": 720,
+  "video": {
+    "backend": "gstreamer_mpp",
+    "strict": false,
+    "fallback": "gstreamer_soft",
+    "codec": "h264",
+    "latency_ms": 100,
+    "appsink_timeout_ms": 2000,
+    "failure_limit": 3
+  },
+  "tracker": {
+    "iou_threshold": 0.2,
+    "dist_threshold": 0.15,
+    "dwell_speed_threshold": 10.0,
+    "dwell_min_duration": 1.5,
+    "dwell_assistance_threshold": 20.0,
+    "avg_person_height_m": 1.7
+  },
+  "mqtt": {
+    "host": "127.0.0.1",
+    "port": 1883,
+    "client_id": "retail-vision-rk3588",
+    "username": "",
+    "password": "",
+    "tls": false
+  },
+  "streams": [
+    {
+      "id": "cam-01",
+      "rtsp_url": "rtsp://127.0.0.1:8554/retail",
+      "enabled": true,
+      "reconnect_delay_ms": 1000,
+      "frame_width": 1280,
+      "frame_height": 720
+    }
+  ]
+}

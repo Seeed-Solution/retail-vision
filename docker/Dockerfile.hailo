@@ -1,0 +1,31 @@
+# Runtime image. Deliberately contains no HailoRT: libhailort.so.4.21.0 and the
+# hailonet GStreamer plugin are bind-mounted read-only from the host, because
+# the plugin, the user library and the kernel driver must all be the same
+# HailoRT version and baking any of them in is how that lock gets broken on the
+# next host update.
+#
+# The builder stage exists only to obtain h264parse. Installing
+# gstreamer1.0-plugins-bad in the runtime stage pulls several hundred packages;
+# h264parse lives in libgstvideoparsersbad.so, whose only dependency outside
+# gstreamer1.0-plugins-base is libgstcodecparsers, so both are copied directly.
+FROM debian:trixie-slim AS gstbad
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gstreamer1.0-plugins-bad && rm -rf /var/lib/apt/lists/*
+
+FROM debian:trixie-slim AS runtime
+# The RTSP branch is rtspsrc ! rtph264depay ! h264parse ! decodebin. Without
+# h264parse gst_parse_launch drops the link and the process dies before a single
+# frame; test:// and file:// sources do not hit that path, which is exactly how
+# a synthetic smoke test can pass while a real camera cannot be ingested.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+    gstreamer1.0-libav libmosquitto1 && rm -rf /var/lib/apt/lists/*
+COPY --from=gstbad /usr/lib/aarch64-linux-gnu/libgstcodecparsers-1.0.so.0* \
+     /usr/lib/aarch64-linux-gnu/
+COPY --from=gstbad /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstvideoparsersbad.so \
+     /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstvideoparsersbad.so
+# --chmod is explicit: a context assembled by copying the binary around can
+# arrive without the exec bit, and the container then fails at exec with
+# "permission denied" rather than anything that points at the cause.
+COPY --chmod=0755 build/retail-vision-hailo /usr/local/bin/retail-vision-hailo
+ENTRYPOINT ["/usr/local/bin/retail-vision-hailo"]

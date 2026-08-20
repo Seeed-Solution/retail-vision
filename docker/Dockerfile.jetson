@@ -1,0 +1,54 @@
+# Jetson (TensorRT) runtime image.
+#
+# The plan is built once by the ultralytics Jetson image and stored in the
+# `orin-models` volume; nothing in this image builds it. Executing a plan needs
+# only the TensorRT Python binding and the CUDA runtime, and the compose file
+# already mounts both from the host -- a TensorRT plan is tied to the exact
+# TensorRT build that produced it, so the host stack has to be the one that
+# loads it anyway. So this image carries no CUDA, no TensorRT, no torch and no
+# ultralytics: just python3, numpy and OpenCV.
+#
+# The base must be Ubuntu 22.04. The host binding mounted at
+# /usr/lib/python3.10/dist-packages/tensorrt is a CPython 3.10 extension
+# (tensorrt.so) linked against the host's libpython3.10 -- 22.04 is the release
+# whose default interpreter is 3.10, so the ABI matches without pinning a PPA.
+ARG BASE_IMAGE=docker.m.daocloud.io/library/ubuntu:22.04
+ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+
+# -- deps stage: wheels only, so pip and its caches never reach the runtime --
+FROM ${BASE_IMAGE} AS deps
+ARG PIP_INDEX
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip3 install --no-cache-dir --index-url ${PIP_INDEX} \
+        --target /pydeps numpy opencv-python-headless \
+    && find /pydeps -name '__pycache__' -type d -prune -exec rm -rf {} + \
+    && find /pydeps -name 'tests' -type d -prune -exec rm -rf {} +
+
+# -- runtime stage ---------------------------------------------------------
+FROM ${BASE_IMAGE} AS tensorrt
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=deps /pydeps /pydeps
+WORKDIR /opt/retail-vision
+COPY core-py/retail_core ./retail_core
+COPY backends/__init__.py ./backends/__init__.py
+COPY backends/tensorrt ./backends/tensorrt
+# /usr/lib/python3.10/dist-packages is where the host TensorRT binding is
+# bind-mounted; Ubuntu's own interpreter only searches /usr/lib/python3/dist-packages.
+#
+# NVIDIA_VISIBLE_DEVICES is what makes the nvidia container runtime act at all:
+# without it no /dev/nvmap or /dev/nvhost-* node is injected and TensorRT fails
+# CUDA init with error 999. The previous base image inherited it from the CUDA
+# image it was built on; a plain ubuntu base has to declare it.
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/opt/retail-vision:/pydeps:/usr/lib/python3.10/dist-packages
+ENTRYPOINT ["python3", "-m", "retail_core.app"]
+CMD ["--config", "/config/config.json"]

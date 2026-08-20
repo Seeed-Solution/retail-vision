@@ -1,0 +1,544 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "In Store Now",
+      "id": 10,
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-recamera"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-recamera"
+          },
+          "query": "from(bucket: \"recamera\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"zone\" and r._field == \"occupancy_count\")\n  |> filter(fn: (r) => r.device =~ /^${device:regex}$/ and r.stream =~ /^${stream:regex}$/)\n  |> group(columns: [\"device\", \"stream\"])\n  |> last()\n  |> group()\n  |> sum()"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Engaged",
+      "id": 11,
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-recamera"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-recamera"
+          },
+          "query": "from(bucket: \"recamera\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"zone\" and r._field == \"engaged_count\")\n  |> filter(fn: (r) => r.device =~ /^${device:regex}$/ and r.stream =~ /^${stream:regex}$/)\n  |> group(columns: [\"device\", \"stream\"])\n  |> last()\n  |> group()\n  |> sum()"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Needs Assistance",
+      "id": 12,
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-recamera"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-recamera"
+          },
+          "query": "from(bucket: \"recamera\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"zone\" and r._field == \"assist_count\")\n  |> filter(fn: (r) => r.device =~ /^${device:regex}$/ and r.stream =~ /^${stream:regex}$/)\n  |> group(columns: [\"device\", \"stream\"])\n  |> last()\n  |> group()\n  |> sum()"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Entries Today",
+      "id": 13,
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-recamera"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-recamera"
+          },
+          "query": "from(bucket: \"recamera\")\n  |> range(start: today())\n  |> filter(fn: (r) => r._measurement == \"zone\" and r._field == \"entry_count\")\n  |> filter(fn: (r) => r.device =~ /^${device:regex}$/ and r.stream =~ /^${stream:regex}$/)\n  |> group(columns: [\"device\", \"stream\"])\n  |> max()\n  |> group()\n  |> sum()"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Avg Dwell",
+      "id": 14,
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-recamera"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-recamera"
+          },
+          "query": "from(bucket: \"recamera\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"zone\" and r._field == \"avg_dwell_time\")\n  |> filter(fn: (r) => r.device =~ /^${device:regex}$/ and r.stream =~ /^${stream:regex}$/)\n  |> group(columns: [\"device\", \"stream\"])\n  |> mean()\n  |> group()\n  |> mean()"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 1,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Cameras Reporting",
+      "id": 15,
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-recamera"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-recamera"
+          },
+          "query": "from(bucket: \"recamera\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"zone\" and r._field == \"occupancy_count\")\n  |> filter(fn: (r) => r.device =~ /^${device:regex}$/ and r.stream =~ /^${stream:regex}$/)\n  |> group(columns: [\"device\", \"stream\"])\n  |> count()\n  |> group()\n  |> count()"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Footfall Over Time",
+      "id": 20,
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-recamera"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-recamera"
+          },
+          "query": "from(bucket: \"recamera\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"zone\" and r._field == \"occupancy_count\")\n  |> filter(fn: (r) => r.device =~ /^${device:regex}$/ and r.stream =~ /^${stream:regex}$/)\n  |> group(columns: [\"device\", \"stream\"])\n  |> aggregateWindow(every: 10m, fn: max, createEmpty: false)\n  |> drop(columns: [\"_start\", \"_stop\", \"_field\", \"_measurement\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Engagement vs Browsing",
+      "id": 21,
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb-recamera"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb-recamera"
+          },
+          "query": "from(bucket: \"recamera\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"zone\" and r._field == \"engaged_count\")\n  |> filter(fn: (r) => r.device =~ /^${device:regex}$/ and r.stream =~ /^${stream:regex}$/)\n  |> group(columns: [\"device\", \"stream\"])\n  |> aggregateWindow(every: 10m, fn: max, createEmpty: false)\n  |> drop(columns: [\"_start\", \"_stop\", \"_field\", \"_measurement\"])\n  |> yield(name: \"engaged\")\n\nfrom(bucket: \"recamera\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"zone\" and r._field == \"browsing_count\")\n  |> filter(fn: (r) => r.device =~ /^${device:regex}$/ and r.stream =~ /^${stream:regex}$/)\n  |> group(columns: [\"device\", \"stream\"])\n  |> aggregateWindow(every: 10m, fn: max, createEmpty: false)\n  |> drop(columns: [\"_start\", \"_stop\", \"_field\", \"_measurement\"])\n  |> yield(name: \"browsing\")"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 12,
+        "h": 20
+      },
+      "id": 6,
+      "options": {
+        "content": "<div id=\"heatmap-container\" style=\"width:100%;height:100%\"></div><script>document.getElementById('heatmap-container').innerHTML='<iframe src=\"'+location.protocol+'//'+location.hostname+':8080/index.html\" width=\"100%\" height=\"100%\" frameborder=\"0\" style=\"border:none;display:block;\"></iframe>';</script>",
+        "mode": "html"
+      },
+      "title": "Spatial Heatmap",
+      "type": "text"
+    },
+    {
+      "type": "text",
+      "title": "Live Video",
+      "id": 95,
+      "gridPos": {
+        "x": 12,
+        "y": 14,
+        "w": 12,
+        "h": 20
+      },
+      "options": {
+        "mode": "html",
+        "content": "<div id=\"rv-video\" style=\"width:100%;height:100%\"></div><script>(function(){var s='${stream}';var base=location.protocol+'//'+location.hostname+':1984';var url=(!s||s==='.*'||s.indexOf('|')>=0)?base+'/':base+'/stream.html?src='+encodeURIComponent(s)+'&mode=webrtc';document.getElementById('rv-video').innerHTML='<iframe src=\"'+url+'\" width=\"100%\" height=\"100%\" frameborder=\"0\" allow=\"autoplay; fullscreen\" style=\"border:none;display:block;\"></iframe>';})();</script>"
+      }
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": [
+    "recamera",
+    "heatmap",
+    "iot"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "device",
+        "label": "Device",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxdb-recamera"
+        },
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"recamera\", tag: \"device\")",
+        "definition": "schema.tagValues(bucket: \"recamera\", tag: \"device\")",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": [],
+        "hide": 0,
+        "skipUrlSync": false,
+        "sort": 1
+      },
+      {
+        "name": "stream",
+        "label": "Camera",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxdb-recamera"
+        },
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"recamera\", tag: \"stream\")",
+        "definition": "schema.tagValues(bucket: \"recamera\", tag: \"stream\")",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": [],
+        "hide": 0,
+        "skipUrlSync": false,
+        "sort": 1
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Retail Analytics Dashboard",
+  "uid": "recamera-heatmap",
+  "version": 1,
+  "weekStart": ""
+}

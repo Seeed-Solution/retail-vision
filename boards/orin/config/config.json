@@ -1,0 +1,47 @@
+{
+  "installation": "store-demo",
+  "backend": "tensorrt",
+  "model_path": "/models/yolo11n.engine",
+  "input_size": 640,
+  "score_threshold": 0.35,
+  "nms_threshold": 0.45,
+  "publish_hz": 1.0,
+  "window_duration": 60.0,
+  "frame_width": 1280,
+  "frame_height": 720,
+  "video": {
+    "backend": "cv2_ffmpeg",
+    "strict": false,
+    "fallback": "none",
+    "read_timeout_ms": 5000,
+    "reopen_delay_ms": 1000,
+    "read_failure_limit": 10
+  },
+  "tracker": {
+    "iou_threshold": 0.2,
+    "dist_threshold": 0.15,
+    "dwell_speed_threshold": 10.0,
+    "dwell_min_duration": 1.5,
+    "dwell_assistance_threshold": 20.0,
+    "avg_person_height_m": 1.7
+  },
+  "mqtt": {
+    "host": "recamera-mosquitto",
+    "port": 1883,
+    "client_id": "retail-vision-orin",
+    "username": "",
+    "password": "",
+    "tls": false
+  },
+  "streams": [
+    {
+      "id": "cam-01",
+      "rtsp_url": "rtsp://test-rtsp:8554/live",
+      "enabled": true,
+      "reconnect_delay_ms": 1000,
+      "frame_width": 1280,
+      "frame_height": 720,
+      "transport": "tcp"
+    }
+  ]
+}
