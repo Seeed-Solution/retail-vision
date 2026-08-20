@@ -43,7 +43,7 @@ and their output validates against a single contract.
 ## Quickstart
 
 ```bash
-git clone https://github.com/seeed-studio/retail-vision.git
+git clone https://github.com/Seeed-Solution/retail-vision.git
 cd retail-vision
 
 # the analytics backend: broker, InfluxDB, Grafana, heatmap, video gateway
