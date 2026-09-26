@@ -1,0 +1,23 @@
+{
+ "description": "ID-switch inheritance: track 1 is counted forward at seq 4 and removed; track 2 is born within reborn_dist(0.05)/reborn_window_s(1.5) on the positive side, inherits side+counted, and its re-crossing is NOT counted a second time.",
+ "analyzer": "line_cross",
+ "config": {
+  "lines": [{"id": "L", "a": [0.5, 0.2], "b": [0.5, 0.8]}],
+  "reborn_window_s": 1.5,
+  "reborn_dist": 0.05
+ },
+ "frames": [
+  {"seq": 1, "t": 0.0, "tracks": [{"track_id": 1, "cx": 0.40, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 2, "t": 0.1, "tracks": [{"track_id": 1, "cx": 0.44, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 3, "t": 0.2, "tracks": [{"track_id": 1, "cx": 0.44, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 4, "t": 0.3, "tracks": [{"track_id": 1, "cx": 0.52, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}], "removed": [1]},
+  {"seq": 5, "t": 0.4, "tracks": [{"track_id": 2, "cx": 0.48, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.8, "class_id": 2, "misses": 0}]},
+  {"seq": 6, "t": 0.5, "tracks": [{"track_id": 2, "cx": 0.48, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.8, "class_id": 2, "misses": 0}]},
+  {"seq": 7, "t": 0.6, "tracks": [{"track_id": 2, "cx": 0.48, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.8, "class_id": 2, "misses": 0}]},
+  {"seq": 8, "t": 0.7, "tracks": [{"track_id": 2, "cx": 0.52, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.8, "class_id": 2, "misses": 0}]}
+ ],
+ "expect_events": [
+  {"seq": 4, "type": "line_cross", "track_id": 1,
+   "fields": {"line_id": "L", "direction": "forward", "anchor": [0.52, 0.55], "class_id": 2, "score": 0.9}}
+ ]
+}

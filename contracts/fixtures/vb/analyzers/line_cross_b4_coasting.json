@@ -1,0 +1,17 @@
+{
+ "description": "B4: the crossing is detected on a coasting frame (misses>0) using the velocity-extrapolated anchor; class_id/score come from the last associated detection.",
+ "analyzer": "line_cross",
+ "config": {
+  "lines": [{"id": "L", "a": [0.5, 0.2], "b": [0.5, 0.8]}]
+ },
+ "frames": [
+  {"seq": 1, "t": 0.0, "tracks": [{"track_id": 1, "cx": 0.42, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.75, "class_id": 5, "misses": 0, "vx": 0.5, "vy": 0.0, "last_seen": 0.0}]},
+  {"seq": 2, "t": 0.1, "tracks": [{"track_id": 1, "cx": 0.42, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.75, "class_id": 5, "misses": 1, "vx": 0.5, "vy": 0.0, "last_seen": 0.0}]},
+  {"seq": 3, "t": 0.2, "tracks": [{"track_id": 1, "cx": 0.42, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.75, "class_id": 5, "misses": 2, "vx": 0.5, "vy": 0.0, "last_seen": 0.0}]},
+  {"seq": 4, "t": 0.3, "tracks": [{"track_id": 1, "cx": 0.42, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.75, "class_id": 5, "misses": 3, "vx": 0.5, "vy": 0.0, "last_seen": 0.0}]}
+ ],
+ "expect_events": [
+  {"seq": 3, "type": "line_cross", "track_id": 1,
+   "fields": {"line_id": "L", "direction": "forward", "anchor": [0.52, 0.55], "class_id": 5, "score": 0.75}}
+ ]
+}

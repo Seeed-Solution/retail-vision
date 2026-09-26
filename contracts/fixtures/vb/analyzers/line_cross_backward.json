@@ -1,0 +1,16 @@
+{
+ "analyzer": "line_cross",
+ "config": {
+  "lines": [{"id": "L", "a": [0.5, 0.2], "b": [0.5, 0.8]}]
+ },
+ "frames": [
+  {"seq": 1, "t": 0.0, "tracks": [{"track_id": 1, "cx": 0.60, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 2, "t": 0.1, "tracks": [{"track_id": 1, "cx": 0.58, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 3, "t": 0.2, "tracks": [{"track_id": 1, "cx": 0.56, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 4, "t": 0.3, "tracks": [{"track_id": 1, "cx": 0.40, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]}
+ ],
+ "expect_events": [
+  {"seq": 4, "type": "line_cross", "track_id": 1,
+   "fields": {"line_id": "L", "direction": "backward", "anchor": [0.40, 0.55], "class_id": 2, "score": 0.9}}
+ ]
+}

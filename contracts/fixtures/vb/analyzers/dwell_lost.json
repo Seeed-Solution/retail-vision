@@ -1,0 +1,92 @@
+{
+ "analyzer": "dwell",
+ "note": "dwell_start at t=1; track removed at t=3 -> dwell_end reason lost, dwell_s=3.",
+ "config": {
+  "radius": 0.03,
+  "min_dwell_s": 1.0
+ },
+ "frames": [
+  {
+   "seq": 1,
+   "t": 0,
+   "tracks": [
+    {
+     "track_id": 1,
+     "cx": 0.5,
+     "cy": 0.44999998807907104,
+     "w": 0.10000000149011612,
+     "h": 0.10000000149011612,
+     "score": 0.800000011920929,
+     "class_id": 0,
+     "misses": 0
+    }
+   ]
+  },
+  {
+   "seq": 2,
+   "t": 1,
+   "tracks": [
+    {
+     "track_id": 1,
+     "cx": 0.5,
+     "cy": 0.44999998807907104,
+     "w": 0.10000000149011612,
+     "h": 0.10000000149011612,
+     "score": 0.800000011920929,
+     "class_id": 0,
+     "misses": 0
+    }
+   ]
+  },
+  {
+   "seq": 3,
+   "t": 2,
+   "tracks": [
+    {
+     "track_id": 1,
+     "cx": 0.5,
+     "cy": 0.44999998807907104,
+     "w": 0.10000000149011612,
+     "h": 0.10000000149011612,
+     "score": 0.800000011920929,
+     "class_id": 0,
+     "misses": 0
+    }
+   ]
+  },
+  {
+   "seq": 4,
+   "t": 3.0,
+   "tracks": [],
+   "removed": [
+    1
+   ]
+  }
+ ],
+ "expect_events": [
+  {
+   "seq": 2,
+   "type": "dwell_start",
+   "track_id": 1,
+   "fields": {
+    "dwell_s": 1.0,
+    "anchor": [
+     0.5,
+     0.499999989
+    ],
+    "zone_id": "",
+    "class_id": 0,
+    "score": 0.800000011920929
+   }
+  },
+  {
+   "seq": 4,
+   "type": "dwell_end",
+   "track_id": 1,
+   "fields": {
+    "dwell_s": 3.0,
+    "reason": "lost"
+   }
+  }
+ ]
+}

@@ -1,0 +1,21 @@
+{
+ "description": "Example plugin (count_plugin.c): one attribute count.frames per track per frame; a count_ten event when a track reaches 10 frames. Run with: vb_selftest analyzer count plugin_count.json --plugin count_plugin.so",
+ "analyzer": "count",
+ "config": {},
+ "frames": [
+  {"seq": 1,  "t": 0.0, "tracks": [{"track_id": 1, "cx": 0.5, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 0, "misses": 0}]},
+  {"seq": 2,  "t": 0.1, "tracks": [{"track_id": 1, "cx": 0.5, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 0, "misses": 0}]},
+  {"seq": 3,  "t": 0.2, "tracks": [{"track_id": 1, "cx": 0.5, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 0, "misses": 0}]},
+  {"seq": 4,  "t": 0.3, "tracks": [{"track_id": 1, "cx": 0.5, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 0, "misses": 0}]},
+  {"seq": 5,  "t": 0.4, "tracks": [{"track_id": 1, "cx": 0.5, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 0, "misses": 0}]},
+  {"seq": 6,  "t": 0.5, "tracks": [{"track_id": 1, "cx": 0.5, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 0, "misses": 0}]},
+  {"seq": 7,  "t": 0.6, "tracks": [{"track_id": 1, "cx": 0.5, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 0, "misses": 0}]},
+  {"seq": 8,  "t": 0.7, "tracks": [{"track_id": 1, "cx": 0.5, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 0, "misses": 0}]},
+  {"seq": 9,  "t": 0.8, "tracks": [{"track_id": 1, "cx": 0.5, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 0, "misses": 0}]},
+  {"seq": 10, "t": 0.9, "tracks": [{"track_id": 1, "cx": 0.5, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 0, "misses": 0}]},
+  {"seq": 11, "t": 1.0, "tracks": [{"track_id": 1, "cx": 0.5, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 0, "misses": 0}]}
+ ],
+ "expect_events": [
+  {"seq": 10, "type": "count_ten", "track_id": 1, "fields": {"frames": 10}}
+ ]
+}

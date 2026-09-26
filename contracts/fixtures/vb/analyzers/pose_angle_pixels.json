@@ -1,0 +1,106 @@
+{
+ "analyzer": "pose_angle",
+ "note": "1920x1080 source, same normalized keypoints. Normalized-space angle = 137.726311 deg, pixel-space angle = 147.848729 deg (16:9 stretch changes the angle); max_deg sits between the two so only the correct pixel-space computation reports angle_out.",
+ "config": {
+  "joints": [
+   {
+    "id": "j",
+    "a": 0,
+    "b": 1,
+    "c": 2,
+    "max_deg": 142.78752
+   }
+  ],
+  "min_conf": 0.3,
+  "hold_s": 0.5
+ },
+ "frames": [
+  {
+   "seq": 1,
+   "t": 0,
+   "tracks": [
+    {
+     "track_id": 1,
+     "cx": 0.5,
+     "cy": 0.44999998807907104,
+     "w": 0.10000000149011612,
+     "h": 0.10000000149011612,
+     "score": 0.800000011920929,
+     "class_id": 0,
+     "misses": 0,
+     "kpts": [
+      [
+       0.10000000149011612,
+       0.20000000298023224,
+       0.8999999761581421
+      ],
+      [
+       0.5,
+       0.30000001192092896,
+       0.8999999761581421
+      ],
+      [
+       0.699999988079071,
+       0.6000000238418579,
+       0.8999999761581421
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "seq": 2,
+   "t": 1,
+   "tracks": [
+    {
+     "track_id": 1,
+     "cx": 0.5,
+     "cy": 0.44999998807907104,
+     "w": 0.10000000149011612,
+     "h": 0.10000000149011612,
+     "score": 0.800000011920929,
+     "class_id": 0,
+     "misses": 0,
+     "kpts": [
+      [
+       0.10000000149011612,
+       0.20000000298023224,
+       0.8999999761581421
+      ],
+      [
+       0.5,
+       0.30000001192092896,
+       0.8999999761581421
+      ],
+      [
+       0.699999988079071,
+       0.6000000238418579,
+       0.8999999761581421
+      ]
+     ]
+    }
+   ]
+  }
+ ],
+ "expect_events": [
+  {
+   "seq": 2,
+   "type": "angle_out",
+   "track_id": 1,
+   "fields": {
+    "joint_id": "j",
+    "angle_deg": 147.848729232,
+    "min_deg": null,
+    "max_deg": 142.78752,
+    "class_id": 0,
+    "score": 0.800000011920929
+   }
+  }
+ ],
+ "geom": {
+  "src_w": 1920,
+  "src_h": 1080,
+  "model_w": 1920,
+  "model_h": 1080
+ }
+}

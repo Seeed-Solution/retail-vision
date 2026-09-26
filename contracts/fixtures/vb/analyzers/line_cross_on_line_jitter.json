@@ -1,0 +1,30 @@
+{
+ "description": "NRD-2 §6.2 mandated case: vertical line at x=0.5, band=0; anchors x = 0.40, 0.45, 0.50, 0.50, 0.50, 0.55, 0.60 produce exactly one event (frames on the line compare against the last non-zero side); then 10 frames alternating 0.50/0.55 produce no new events.",
+ "analyzer": "line_cross",
+ "config": {
+  "lines": [{"id": "L", "a": [0.5, 0.2], "b": [0.5, 0.8]}]
+ },
+ "frames": [
+  {"seq": 1,  "t": 0.0, "tracks": [{"track_id": 1, "cx": 0.40, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 2,  "t": 0.1, "tracks": [{"track_id": 1, "cx": 0.45, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 3,  "t": 0.2, "tracks": [{"track_id": 1, "cx": 0.50, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 4,  "t": 0.3, "tracks": [{"track_id": 1, "cx": 0.50, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 5,  "t": 0.4, "tracks": [{"track_id": 1, "cx": 0.50, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 6,  "t": 0.5, "tracks": [{"track_id": 1, "cx": 0.55, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 7,  "t": 0.6, "tracks": [{"track_id": 1, "cx": 0.60, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 8,  "t": 0.7, "tracks": [{"track_id": 1, "cx": 0.50, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 9,  "t": 0.8, "tracks": [{"track_id": 1, "cx": 0.55, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 10, "t": 0.9, "tracks": [{"track_id": 1, "cx": 0.50, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 11, "t": 1.0, "tracks": [{"track_id": 1, "cx": 0.55, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 12, "t": 1.1, "tracks": [{"track_id": 1, "cx": 0.50, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 13, "t": 1.2, "tracks": [{"track_id": 1, "cx": 0.55, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 14, "t": 1.3, "tracks": [{"track_id": 1, "cx": 0.50, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 15, "t": 1.4, "tracks": [{"track_id": 1, "cx": 0.55, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 16, "t": 1.5, "tracks": [{"track_id": 1, "cx": 0.50, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 17, "t": 1.6, "tracks": [{"track_id": 1, "cx": 0.55, "cy": 0.5, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]}
+ ],
+ "expect_events": [
+  {"seq": 6, "type": "line_cross", "track_id": 1,
+   "fields": {"line_id": "L", "direction": "forward", "anchor": [0.55, 0.55], "class_id": 2, "score": 0.9}}
+ ]
+}
