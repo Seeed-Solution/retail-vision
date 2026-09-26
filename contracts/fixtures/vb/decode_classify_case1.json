@@ -1,0 +1,46 @@
+{
+ "note": "Hand-computed: softmax(0,3,1,2,-1) = (0.031685, 0.636409, 0.086129, 0.234122, 0.011656); top_k=2 -> class 1 (0.636409) then class 3 (0.234122), whole-frame boxes cx=cy=0.5 w=h=1.",
+ "decoder": {
+  "type": "classify",
+  "num_classes": 5,
+  "top_k": 2
+ },
+ "model_hw": [
+  224,
+  224
+ ],
+ "score": 0.01,
+ "nms": 0.45,
+ "tensors": [
+  {
+   "dims": [
+    5
+   ],
+   "data": [
+    0.0,
+    3.0,
+    1.0,
+    2.0,
+    -1.0
+   ]
+  }
+ ],
+ "expect": [
+  {
+   "cx": 0.5,
+   "cy": 0.5,
+   "w": 1.0,
+   "h": 1.0,
+   "score": 0.636409,
+   "class_id": 1
+  },
+  {
+   "cx": 0.5,
+   "cy": 0.5,
+   "w": 1.0,
+   "h": 1.0,
+   "score": 0.234122,
+   "class_id": 3
+  }
+ ]
+}

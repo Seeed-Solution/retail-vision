@@ -1,0 +1,106 @@
+{
+ "note": "Hand-computed: 16x16 canvas, one [17,2,2] tensor (stride 8, reg_max 4, nc 1). Cell (1,1): every direction has a one-hot bin vector [0,20,0,0]; softmax weight of the other bins is e^-20 ~ 2e-9, so the expected distance is 1 bin = 8 px on each side: x0=y0=(1.5-1)*8=4, x1=y1=(1.5+1)*8=20 -> cx=cy=12 px = (0.75,0.75), w=h=16 px = 1.0. cls logit ln4 -> sigmoid 0.8. Other cells sigmoid(~4.5e-5) < 0.3 dropped.",
+ "decoder": {
+  "type": "yolov8_dfl",
+  "num_classes": 1,
+  "reg_max": 4,
+  "strides": [
+   8
+  ]
+ },
+ "model_hw": [
+  16,
+  16
+ ],
+ "score": 0.3,
+ "nms": 0.45,
+ "tensors": [
+  {
+   "dims": [
+    17,
+    2,
+    2
+   ],
+   "data": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    20.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    20.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    20.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    20.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    -10.0,
+    -10.0,
+    -10.0,
+    1.3862943611198906
+   ]
+  }
+ ],
+ "expect": [
+  {
+   "cx": 0.75,
+   "cy": 0.75,
+   "w": 1.0,
+   "h": 1.0,
+   "score": 0.8,
+   "class_id": 0
+  }
+ ]
+}

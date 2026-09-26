@@ -1,0 +1,73 @@
+{
+ "note": "Hand-computed: 4 anchors in [N,6] rows on a 100x100 canvas; boxes are pixels, cls already sigmoid. Anchor 3 best score 0.4 <= 0.5 dropped. NMS (0.45) keeps the rest in descending score order: (0.5,0.5,0.2,0.4,s=.9,c0), (0.2,0.8,0.1,0.1,s=.8,c1), (0.8,0.2,0.1,0.1,s=.6,c0).",
+ "decoder": {
+  "type": "yolov8",
+  "num_classes": 2
+ },
+ "model_hw": [
+  100,
+  100
+ ],
+ "score": 0.5,
+ "nms": 0.45,
+ "tensors": [
+  {
+   "dims": [
+    4,
+    6
+   ],
+   "data": [
+    50,
+    50,
+    20,
+    40,
+    0.9,
+    0.1,
+    20,
+    80,
+    10,
+    10,
+    0.2,
+    0.8,
+    80,
+    20,
+    10,
+    10,
+    0.6,
+    0.05,
+    30,
+    30,
+    10,
+    10,
+    0.4,
+    0.4
+   ]
+  }
+ ],
+ "expect": [
+  {
+   "cx": 0.5,
+   "cy": 0.5,
+   "w": 0.2,
+   "h": 0.4,
+   "score": 0.9,
+   "class_id": 0
+  },
+  {
+   "cx": 0.2,
+   "cy": 0.8,
+   "w": 0.1,
+   "h": 0.1,
+   "score": 0.8,
+   "class_id": 1
+  },
+  {
+   "cx": 0.8,
+   "cy": 0.2,
+   "w": 0.1,
+   "h": 0.1,
+   "score": 0.6,
+   "class_id": 0
+  }
+ ]
+}

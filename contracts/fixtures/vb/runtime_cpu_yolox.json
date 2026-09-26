@@ -1,0 +1,16 @@
+{
+ "description": "M1.9 CPU smoke config: YOLOX-Tiny (416x416, 80 classes, Apache-2.0, see core-cpp/vb/third_party/THIRD_PARTY.md) downloaded to /tmp/yolox_tiny.onnx per BASE-1 7. Parity run: vb-runtime --parity /tmp/par --frames 20 --config <this file> over the default synthetic stream.",
+ "backend": {
+  "name": "cpu",
+  "model_path": "/tmp/yolox_tiny.onnx",
+  "intra_threads": 2
+ },
+ "runtime": {
+  "contexts_per_worker": 1,
+  "open_timeout_s": 5.0,
+  "reconnect_delay_s": 1.0
+ },
+ "tracker": {},
+ "analyzers": {"plugins": []},
+ "snapshot_ring": {"frames": 2}
+}
