@@ -80,6 +80,25 @@ def test_standalone_frame_every_counts():
         assert 8 <= n <= 16, per
 
 
+def test_standalone_float_rule_matches_python(tmp_path):
+    """inference_ms is not normalised, so it exercises the rounding rule
+    outside [0, 1): C++ output must equal Python apps._num6 of the same
+    float32 value (§6.10.2)."""
+    import struct
+    from vision_base.apps import _num6
+    infer = 12.3456789
+    cfg = json.loads(FIXTURE.read_text())
+    cfg["backend"]["infer_ms"] = infer
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps(cfg))
+    rc, out, err = run_standalone(tmp_path, "--frame-every", "1", config=p)
+    assert rc == 0, err
+    got = {o["inference_ms"] for o in parse_all(out) if o["schema"] == "vb.frame/1"}
+    f32 = struct.unpack("f", struct.pack("f", infer))[0]
+    assert got == {_num6(f32)}, (got, _num6(f32))
+    assert _num6(f32) != float("%.6g" % f32)  # the old rule would fail here
+
+
 def test_standalone_no_frames_by_default():
     rc, out, err = run_standalone(None, "--frame-every", "0")
     assert rc == 0, err

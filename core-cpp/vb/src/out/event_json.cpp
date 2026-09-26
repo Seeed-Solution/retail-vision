@@ -12,11 +12,12 @@ namespace vb {
 
 namespace {
 
-// §6.10.2 consistency rule: floats are emitted with %.6g precision so the
-// C++ and Python (round(x, 6)) outputs compare equal.
+// §6.10.2 consistency rule: floats are rounded to 6 decimal places, the same
+// rule as Python round(x, 6) in vision_base.apps. %.6g (6 significant digits)
+// only agrees with it on [0.1, 1) and diverged on inference_ms.
 Json num6(double v) {
-    char buf[40];
-    std::snprintf(buf, sizeof buf, "%.6g", v);
+    char buf[352];  // %.6f of the largest double fits in 317 bytes
+    std::snprintf(buf, sizeof buf, "%.6f", v);
     return Json(std::strtod(buf, nullptr));
 }
 
