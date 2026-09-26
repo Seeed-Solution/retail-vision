@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+*.egg-info/
 venv/
 
 # C++ build output
@@ -27,6 +28,7 @@ testdata/
 # they are the test inputs CI runs the validator against, so they stay tracked.
 *.jsonl
 !contracts/fixtures/*.jsonl
+!contracts/fixtures/vb/*.jsonl
 
 # macOS
 .DS_Store

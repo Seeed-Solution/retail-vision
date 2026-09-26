@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vb-event.schema.json",
+  "title": "vb.event/1",
+  "type": "object",
+  "required": ["schema", "device_id", "stream_id", "seq", "ts_ms", "analyzer", "type", "track_id", "fields"],
+  "properties": {
+    "schema": {"const": "vb.event/1"},
+    "device_id": {"type": "string"},
+    "stream_id": {"type": "string"},
+    "seq": {"type": "integer", "minimum": 0},
+    "ts_ms": {"type": "integer", "minimum": 0},
+    "analyzer": {"type": "string", "minLength": 1},
+    "type": {"type": "string", "minLength": 1},
+    "track_id": {"type": "integer", "minimum": 0},
+    "fields": {"type": "object"}
+  }
+}

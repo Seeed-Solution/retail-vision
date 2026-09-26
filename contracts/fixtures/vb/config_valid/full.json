@@ -1,0 +1,22 @@
+{
+  "schema": "vb.config/1",
+  "device_id": "rk3576-demo-01",
+  "backend": {"name": "rknn", "model_path": "/models/model.rknn", "input_size": [640, 640],
+              "align": "center", "score_threshold": 0.35, "nms_threshold": 0.45, "options": {}},
+  "runtime": {"workers": "auto", "max_streams_per_worker": 0, "contexts_per_worker": 1,
+              "publishers_per_process": 1, "publish_queue": 256, "max_streams": 16,
+              "open_timeout_s": 8.0, "reconnect_delay_s": 1.0, "restart_backoff_s": 5.0},
+  "native": {"binary": "/opt/vb/bin/vb-runtime", "hello_timeout_s": 10.0, "snapshot_ring": 2, "jpeg_quality": 85},
+  "state_dir": "/data/vb",
+  "tracker": {"enabled": true, "iou_threshold": 0.2, "dist_threshold": 0.15, "max_misses": 15, "max_lost_s": 0.0,
+              "min_hits": 1, "class_aware": true, "anchor": "center"},
+  "analyzers": {"plugins": []},
+  "mqtt": {"host": "127.0.0.1", "port": 1883, "client_id": "vb-rk3576-demo-01", "username": "", "password": "",
+           "tls": false, "ca_file": "", "keepalive_s": 30, "topic_root": "site/vision/rk3576-demo-01",
+           "status_interval_s": 10},
+  "health": {"host": "0.0.0.0", "port": 8099},
+  "streams_file": "/data/vb/streams.json",
+  "streams": [{"stream_id": "cam-01", "url": "rtsp://127.0.0.1:8554/a", "name": "", "transport": "tcp",
+               "score_threshold": null, "options": {"max_fps": 0, "roi_crop": null}}],
+  "app": {"name": "echo", "module": "vision_base.hooks:EchoApp", "options": {"publish_hz": 1.0, "frame_stride": 1}}
+}

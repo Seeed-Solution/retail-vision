@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vb-status.schema.json",
+  "title": "vb.status/1",
+  "type": "object",
+  "required": ["schema", "timestamp", "session_id", "device_id", "online"],
+  "properties": {
+    "schema": {"const": "vb.status/1"},
+    "timestamp": {"type": "integer"},
+    "session_id": {"type": "string"},
+    "device_id": {"type": "string"},
+    "online": {"type": "boolean"},
+    "versions": {
+      "type": "object",
+      "properties": {
+        "base": {"type": "string"},
+        "app": {"type": "string"},
+        "backend": {"type": "string"},
+        "model_sha256": {"type": "string"}
+      }
+    },
+    "uptime_s": {"type": "number"},
+    "shards": {"type": "integer"},
+    "streams": {"type": "array", "items": {"$ref": "#/$defs/stream"}}
+  },
+  "$defs": {
+    "stream": {
+      "type": "object",
+      "required": ["stream_id", "state", "fps", "decode", "fallback_active"],
+      "properties": {
+        "stream_id": {"type": "string"},
+        "name": {"type": "string"},
+        "state": {"enum": ["starting", "running", "reconnecting", "stopped", "error"]},
+        "fps": {"type": "number"},
+        "decode": {"type": "string"},
+        "fallback_active": {"type": "boolean"},
+        "score_threshold": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "shard": {"type": "integer"},
+        "frame": {"type": "object", "properties": {"w": {"type": "integer"}, "h": {"type": "integer"}}},
+        "inference_ms_p50": {"type": "number"},
+        "inference_ms_p95": {"type": "number"},
+        "queue_delay_ms_p95": {"type": "number"},
+        "dropped_frames": {"type": "integer"},
+        "hook_frames_dropped": {"type": "integer"}
+      }
+    }
+  }
+}

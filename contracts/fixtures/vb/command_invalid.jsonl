@@ -1,0 +1,10 @@
+{"schema":"vb.command/2","device_id":"d","request_id":"r","command":"list_streams","params":{}}
+{"schema":"vb.command/1","device_id":"d","request_id":"","command":"list_streams","params":{}}
+{"schema":"vb.command/1","device_id":"d","request_id":"this-request-id-is-way-too-long-to-be-accepted-by-the-vb-command-one-schema-limit-of-128-chars-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","command":"list_streams","params":{}}
+{"schema":"vb.command/1","device_id":"d","request_id":"r","command":"restart","params":{}}
+{"schema":"vb.command/1","device_id":"d","request_id":"r","command":"add_stream","params":{"stream_id":"bad id!","url":"rtsp://x/s"}}
+{"schema":"vb.command/1","device_id":"d","request_id":"r","command":"add_stream","params":{"stream_id":"ok-id"}}
+{"schema":"vb.command/1","device_id":"d","request_id":"r","command":"set_threshold","params":{"stream_id":"ok-id","score_threshold":1.5}}
+{"schema":"vb.command/1","device_id":"d","request_id":"r","command":"add_stream","params":"not-an-object"}
+{"schema":"vb.command/1","device_id":"d","request_id":"r","command":"add_stream","params":{"stream_id":"ok-id","url":"rtsp://x/s","options":{"roi_crop":[0.1,0.2,0.3]}}}
+{"schema":"vb.command/1","timestamp":"not-an-int","device_id":"d","request_id":"r","command":"list_streams","params":{}}

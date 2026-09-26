@@ -1,0 +1,9 @@
+{
+  "schema": "vb.config/1",
+  "device_id": "cpu-dev-01",
+  "backend": {"name": "cpu", "model_path": "/models/yolov8n.onnx",
+              "input_size": [640, 640],
+              "decoder": {"type": "yolov8", "num_classes": 2}},
+  "mqtt": {"host": "127.0.0.1", "topic_root": "site/vision/cpu-dev-01"},
+  "app": {"module": "vision_base.hooks:EchoApp"}
+}

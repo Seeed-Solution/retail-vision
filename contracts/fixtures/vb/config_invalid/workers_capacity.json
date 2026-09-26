@@ -1,0 +1,52 @@
+{
+  "schema": "vb.config/1",
+  "device_id": "cpu-dev-01",
+  "backend": {
+    "name": "cpu",
+    "model_path": "/models/yolox-tiny.onnx",
+    "input_size": [
+      416,
+      416
+    ],
+    "align": "top_left",
+    "score_threshold": 0.3,
+    "nms_threshold": 0.45,
+    "options": {}
+  },
+  "mqtt": {
+    "host": "127.0.0.1",
+    "topic_root": "site/vision/cpu-dev-01"
+  },
+  "streams": [
+    {
+      "stream_id": "syn-0",
+      "url": "synthetic://0",
+      "transport": "tcp",
+      "options": {
+        "max_fps": 0,
+        "roi_crop": null
+      }
+    },
+    {
+      "stream_id": "syn-1",
+      "url": "synthetic://1",
+      "score_threshold": 0.4,
+      "options": {
+        "max_fps": 5,
+        "roi_crop": [
+          0.1,
+          0.1,
+          0.9,
+          0.9
+        ]
+      }
+    }
+  ],
+  "app": {
+    "module": "vision_base.hooks:EchoApp"
+  },
+  "runtime": {
+    "workers": 1,
+    "max_streams_per_worker": 1
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vb-ack.schema.json",
+  "title": "vb.ack/1",
+  "type": "object",
+  "required": ["schema", "timestamp", "session_id", "device_id", "request_id", "command", "ok"],
+  "properties": {
+    "schema": {"const": "vb.ack/1"},
+    "timestamp": {"type": "integer"},
+    "session_id": {"type": "string"},
+    "device_id": {"type": "string"},
+    "request_id": {"type": "string"},
+    "command": {"type": "string"},
+    "ok": {"type": "boolean"},
+    "error": {"type": "string"},
+    "applied": {"type": "object"}
+  },
+  "allOf": [
+    {"if": {"properties": {"ok": {"const": false}}}, "then": {"required": ["error"]}},
+    {"if": {"properties": {"ok": {"const": true}}}, "then": {"required": ["applied"]}}
+  ]
+}
