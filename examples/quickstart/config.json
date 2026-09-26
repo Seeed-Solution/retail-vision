@@ -1,0 +1,16 @@
+{
+  "schema": "vb.config/1",
+  "device_id": "door-01",
+  "backend": {"name": "cpu", "model_path": "/models/yolox_tiny.onnx",
+              "input_size": [416, 416], "decoder": {"type": "yolox"}},
+  "mqtt": {"host": "127.0.0.1", "topic_root": "demo/vision/door-01"},
+  "app": {"module": "vision_base.apps:ConfigApp"},
+  "streams": [{
+    "stream_id": "door",
+    "url": "rtsp://camera.local:554/stream1",
+    "options": {"analyzers": [
+      {"name": "line_cross", "config": {"lines": [{"id": "door", "a": [0.1, 0.6], "b": [0.9, 0.6]}], "classes": [0]}},
+      {"name": "count_threshold", "config": {"max_count": 5, "hold_s": 2.0, "classes": [0]}}
+    ]}
+  }]
+}
