@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -163,6 +164,7 @@ int main(int argc, char** argv) {
     int frames = 50;
     int frame_every = 0, status_every = -1;
     bool standalone = false;
+    bool dev = false;  // §6.12 dev-mode raw tensor passthrough
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() -> const char* {
@@ -179,6 +181,8 @@ int main(int argc, char** argv) {
             listen_path = next();
         } else if (a == "--standalone") {
             standalone = true;
+        } else if (a == "--dev") {
+            dev = true;
         } else if (a == "--output") {
             output = next();
         } else if (a == "--frame-every") {
@@ -201,9 +205,14 @@ int main(int argc, char** argv) {
     if (argc == 1) {
         std::fprintf(stderr,
                      "usage: vb-runtime --ipc-fd N | --listen PATH --config PATH "
-                     "[--parity DIR] [--frames N] [--version]\n"
+                     "[--parity DIR] [--frames N] [--dev] [--version]\n"
                      "       vb-runtime --standalone --config PATH "
-                     "--output jsonl|mqtt [--frame-every N] [--status-every S]\n");
+                     "--output jsonl|mqtt [--frame-every N] [--status-every S] [--dev]\n");
+        return 2;
+    }
+    // §6.12: production base images set VB_PRODUCTION=1; --dev is refused.
+    if (dev && std::getenv("VB_PRODUCTION") != nullptr) {
+        std::fprintf(stderr, "dev mode disabled in production image\n");
         return 2;
     }
     if (standalone && (listen_path || ipc_fd >= 0 || parity_dir)) {
@@ -221,6 +230,7 @@ int main(int argc, char** argv) {
         }
         so.frame_every = frame_every;
         so.status_every = status_every;
+        so.dev = dev;
         if (!config_path) {
             std::fprintf(stderr, "--config is required\n");
             return 2;
@@ -232,7 +242,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::string err;
-    RuntimeConfig cfg = RuntimeConfig::load(config_path, err);
+    RuntimeConfig cfg = RuntimeConfig::load(config_path, err, dev);
     if (!err.empty()) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return 1;

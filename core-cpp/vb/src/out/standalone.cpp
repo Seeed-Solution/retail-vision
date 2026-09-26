@@ -175,7 +175,7 @@ int run_standalone(const StandaloneOpts& opts) {
         return 1;
     }
 
-    RuntimeConfig rcfg = RuntimeConfig::from_json(cfg, err);
+    RuntimeConfig rcfg = RuntimeConfig::from_json(cfg, err, opts.dev);
     if (!err.empty()) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return 1;

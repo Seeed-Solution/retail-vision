@@ -15,6 +15,7 @@
 #include <onnxruntime_c_api.h>
 
 #include "cpu_backend.h"
+#include "dev_tensor.h"
 #include "sha256.h"
 #include "sources/gst_source.h"
 #include "sources/synthetic.h"
@@ -109,15 +110,20 @@ void preprocess(const FrameBuf& f, const LetterboxGeom& g, bool bgr,
 
 class CpuBackend;
 
-class CpuContext : public InferenceContext {
+class CpuContext : public InferenceContext, public RawTensorSource {
 public:
     CpuContext(class CpuBackend* b) : b_(b) {}
 
     int infer(const FrameBuf* const* frames, size_t n, float score, float nms_th,
               DetectionResult* out, std::string& err) override;
 
+    // §6.12 dev mode: raw outputs of the most recent infer(), only populated
+    // when backend.decoder.type == "raw". Defined after CpuBackend.
+    bool last_raw_tensors(std::vector<DevTensor>& out) override;
+
 private:
     class CpuBackend* b_;
+    std::vector<DevTensor> raw_;  // this context's copy, taken under run_mu_
 };
 
 class CpuBackend : public Backend {
@@ -139,6 +145,7 @@ public:
             // §6.11 M1.15: backend.decoder object selects the shared decoder.
             decoder_ = make_decoder(dj->dump(), err);
             if (!decoder_) return;
+            decoder_is_raw_ = dj->value("type", std::string()) == "raw";  // §6.12
         } else {
             std::string decoder =
                 (dj != j.end() && dj->is_string()) ? dj->get<std::string>() : "yolox";
@@ -354,6 +361,22 @@ public:
                 views[oi].count = elem;
                 if (!dims.empty() && dims[0] == 1) dims.erase(dims.begin());  // drop batch
                 views[oi].dims = std::move(dims);
+                views[oi].name = onames[oi];
+            }
+            if (decoder_is_raw_) {
+                // §6.12 dev mode: copy the raw outputs for VBT1 passthrough.
+                std::vector<DevTensor> cap;
+                for (const auto& v : views) {
+                    if (v.dims.size() > 4) continue;  // VBT1 carries up to 4 dims
+                    DevTensor t;
+                    t.name = v.name;
+                    for (int64_t d : v.dims) t.dims.push_back(static_cast<int32_t>(d));
+                    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(v.data);
+                    t.data.assign(bytes, bytes + v.count * sizeof(float));
+                    cap.push_back(std::move(t));
+                }
+                std::lock_guard<std::mutex> lk(raw_mu_);
+                last_raw_ = std::move(cap);
             }
             out.dets.clear();
             out.kpts.clear();
@@ -485,6 +508,9 @@ private:
 
     std::string model_path_, sha256_, input_name_, output_name_;
     std::unique_ptr<Decoder> decoder_;  // §6.11 backend.decoder (may be null)
+    bool decoder_is_raw_ = false;       // §6.12 dev-mode raw passthrough
+    std::mutex raw_mu_;                 // guards last_raw_
+    std::vector<DevTensor> last_raw_;   // dev-mode raw outputs (§6.12)
     std::vector<std::string> out_names_;  // all outputs when decoder_ is set
     OrtSession* session_ = nullptr;
     int model_w_ = 0, model_h_ = 0;
@@ -494,6 +520,11 @@ private:
     bool ok_ = false;
 };
 
+bool CpuContext::last_raw_tensors(std::vector<DevTensor>& out) {
+    out = raw_;
+    return !out.empty();
+}
+
 int CpuContext::infer(const FrameBuf* const* frames, size_t n, float score, float nms_th,
                       DetectionResult* out, std::string& err) {
     if (n != 1) {
@@ -502,6 +533,12 @@ int CpuContext::infer(const FrameBuf* const* frames, size_t n, float score, floa
     }
     std::lock_guard<std::mutex> lk(b_->run_mu_);
     if (!b_->run(*frames[0], score, nms_th, out[0], err)) return -1;
+    // The backend-wide buffer is overwritten by the next context's run(), so
+    // copy it while run_mu_ still pins it to this frame (§6.12).
+    if (b_->decoder_is_raw_) {
+        std::lock_guard<std::mutex> rk(b_->raw_mu_);
+        raw_ = b_->last_raw_;
+    }
     return 0;
 }
 

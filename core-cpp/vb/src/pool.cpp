@@ -126,6 +126,9 @@ void ContextPool::process(const std::shared_ptr<StreamState>& s, FrameBuf& f,
         return;  // frame dropped; the source keeps producing
     }
 
+    // §6.12: dev-mode raw tensor passthrough (VBT1), no-op unless enabled.
+    rt_->maybe_send_dev_tensors(*s, f, res, ctx);
+
     std::vector<uint32_t> removed;
     const std::vector<Track>& alive =
         s->tracker.update(res.dets, res.kpts, f.t_mono_s, removed);

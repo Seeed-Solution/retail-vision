@@ -16,6 +16,7 @@
 #include <thread>
 #include <vector>
 
+#include "dev_tensor.h"
 #include "vb/analyzer.h"
 #include "vb/backend.h"
 #include "vb/json.h"
@@ -117,9 +118,14 @@ struct RuntimeConfig {
     TrackerConfig tracker;
     std::vector<std::string> plugin_paths;  // preloaded analyzer plugins
     int snapshot_ring = 2;
+    DevConfig dev;                          // §6.12 dev-mode tensor passthrough
 
-    static RuntimeConfig load(const std::string& path, std::string& err);
-    static RuntimeConfig from_json(const Json& j, std::string& err);
+    // allow_dev: config dev.raw_tensors=true is accepted only when the
+    // process was started with --dev (§6.12).
+    static RuntimeConfig load(const std::string& path, std::string& err,
+                              bool allow_dev = false);
+    static RuntimeConfig from_json(const Json& j, std::string& err,
+                                   bool allow_dev = false);
 };
 
 class ContextPool;  // below
@@ -173,6 +179,9 @@ struct StreamState {
 
     // Set once the first frame after (re)connect was produced.
     std::atomic<bool> got_first_frame{false};
+
+    // Dev-mode VBT1 rate limiter (§6.12 dev.max_fps).
+    DevRateLimiter dev_limiter;
 };
 
 class Runtime {
@@ -230,6 +239,10 @@ private:
     std::shared_ptr<StreamState> add_stream_locked(const StreamSpec& spec,
                                                    const Json& analyzers,
                                                    std::string& err);
+    // §6.12: when dev mode is active (dev.raw_tensors + backend.decoder.type
+    // == "raw"), rate-limit and push a VBT1 record for this frame.
+    void maybe_send_dev_tensors(StreamState& s, const FrameBuf& f,
+                                const DetectionResult& res, InferenceContext* ctx);
     void source_thread(std::shared_ptr<StreamState> s,
                        std::unique_ptr<FrameSource> src);
     void stats_thread();
@@ -248,6 +261,9 @@ private:
     std::thread stats_thread_;
     std::atomic<bool> stopping_{false};
     std::atomic<bool> stop_requested_{false};
+
+    bool dev_active_ = false;  // dev.raw_tensors && decoder.type == "raw"
+    std::atomic<uint64_t> dev_tensor_oversize_{0};
 };
 
 // Serves one connected fd: reads newline-delimited JSON control lines

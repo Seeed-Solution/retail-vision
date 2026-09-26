@@ -41,6 +41,7 @@ add_library(vb_core STATIC
     src/analyzers/count_threshold.cpp
     src/analyzers/pose_angle.cpp
     src/sources/synthetic.cpp
+    src/dev_tensor.cpp
     src/snapshot.cpp
     src/out/standalone.cpp
     src/out/event_json.cpp
@@ -142,6 +143,12 @@ if(VB_TESTS)
     add_executable(test_wire tests/test_wire.cpp)
     target_link_libraries(test_wire PRIVATE vb_core)
     add_test(NAME wire COMMAND test_wire ${CMAKE_CURRENT_SOURCE_DIR}/../../contracts/fixtures/vb)
+
+    add_executable(test_dev_tensor tests/test_dev_tensor.cpp)
+    target_link_libraries(test_dev_tensor PRIVATE vb_core)
+    add_test(NAME dev_tensor COMMAND test_dev_tensor
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../contracts/fixtures/vb
+        $<TARGET_FILE:vb-runtime>)
 
     add_executable(vb_wire_gen tools/vb_wire_gen.cpp)
     target_link_libraries(vb_wire_gen PRIVATE vb_core)

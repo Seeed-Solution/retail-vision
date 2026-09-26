@@ -12,6 +12,7 @@
 #include <thread>
 
 #include "sources/synthetic.h"
+#include "dev_tensor.h"
 #include "vb/json.h"
 #include "vb/letterbox.h"
 
@@ -138,10 +139,19 @@ private:
     double next_tick_s_ = 0;
 };
 
-class SyntheticContext : public InferenceContext {
+class SyntheticContext : public InferenceContext, public RawTensorSource {
 public:
-    SyntheticContext(int model_w, int model_h, int boxes, double infer_ms)
-        : model_w_(model_w), model_h_(model_h), boxes_(boxes), infer_ms_(infer_ms) {}
+    SyntheticContext(int model_w, int model_h, int boxes, double infer_ms,
+                     bool raw)
+        : model_w_(model_w), model_h_(model_h), boxes_(boxes), infer_ms_(infer_ms),
+          raw_(raw) {}
+
+    // §6.12: raw outputs of the most recent infer() (frames[0]).
+    bool last_raw_tensors(std::vector<DevTensor>& out) override {
+        std::lock_guard<std::mutex> lk(raw_mu_);
+        out = last_raw_;
+        return !out.empty();
+    }
 
     int infer(const FrameBuf* const* frames, size_t n, float score, float nms,
               DetectionResult* out, std::string& err) override {
@@ -170,6 +180,29 @@ public:
                 d.class_id = k;
                 r.dets.push_back(d);
             }
+            if (raw_) {
+                // §6.12 dev mode: keep the would-be decoded boxes as one raw
+                // f32 [boxes, 5] tensor (cx, cy, w, h, score rows), and decode
+                // nothing (VBR1 n_det = 0, like the shared "raw" decoder).
+                if (i == 0) {
+                    DevTensor t;
+                    t.name = "output0";
+                    t.dims = {boxes_, 5};
+                    t.data.resize(static_cast<size_t>(boxes_) * 5 * sizeof(float));
+                    float* dst = reinterpret_cast<float*>(t.data.data());
+                    for (int k = 0; k < boxes_; ++k) {
+                        const Detection& d = r.dets[static_cast<size_t>(k)];
+                        dst[k * 5 + 0] = d.cx;
+                        dst[k * 5 + 1] = d.cy;
+                        dst[k * 5 + 2] = d.w;
+                        dst[k * 5 + 3] = d.h;
+                        dst[k * 5 + 4] = d.score;
+                    }
+                    std::lock_guard<std::mutex> lk(raw_mu_);
+                    last_raw_.assign(1, std::move(t));
+                }
+                r.dets.clear();
+            }
             r.preprocess_ms = 0;
             r.inference_ms = static_cast<float>(infer_ms_);
             r.postprocess_ms = 0;
@@ -180,6 +213,9 @@ public:
 private:
     int model_w_, model_h_, boxes_;
     double infer_ms_;
+    bool raw_;
+    std::mutex raw_mu_;
+    std::vector<DevTensor> last_raw_;
 };
 
 class SyntheticBackend : public Backend {
@@ -194,6 +230,9 @@ public:
             if (j.contains("model_h")) model_h_ = j.at("model_h").get<int>();
             if (j.contains("boxes")) boxes_ = std::max(0, j.at("boxes").get<int>());
             if (j.contains("infer_ms")) infer_ms_ = j.at("infer_ms").get<double>();
+            auto dj = j.find("decoder");
+            if (dj != j.end() && dj->is_object())
+                raw_ = dj->value("type", std::string()) == "raw";  // §6.12
         }
     }
 
@@ -222,12 +261,14 @@ public:
                                                      std::string& err) override {
         (void)index;
         (void)err;
-        return std::make_unique<SyntheticContext>(model_w_, model_h_, boxes_, infer_ms_);
+        return std::make_unique<SyntheticContext>(model_w_, model_h_, boxes_, infer_ms_,
+                                                  raw_);
     }
 
 private:
     int max_batch_ = 2, model_w_ = 640, model_h_ = 640, boxes_ = 3;
     double infer_ms_ = 0;
+    bool raw_ = false;
 };
 
 }  // namespace

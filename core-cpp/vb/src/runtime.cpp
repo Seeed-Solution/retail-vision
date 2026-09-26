@@ -37,9 +37,11 @@ std::string json_get_str(const Json& j, const char* key, const std::string& dflt
 
 // ---- RuntimeConfig ----
 
-RuntimeConfig RuntimeConfig::from_json(const Json& j, std::string& err) {
+RuntimeConfig RuntimeConfig::from_json(const Json& j, std::string& err,
+                                       bool allow_dev) {
     RuntimeConfig c;
     try {
+        if (!dev_config_from_json(j, allow_dev, c.dev, err)) return c;
         const Json& backend = j.at("backend");
         c.backend_name = backend.at("name").get<std::string>();
         c.backend_json = json_dump(backend);
@@ -118,7 +120,8 @@ RuntimeConfig RuntimeConfig::from_json(const Json& j, std::string& err) {
     }
 }
 
-RuntimeConfig RuntimeConfig::load(const std::string& path, std::string& err) {
+RuntimeConfig RuntimeConfig::load(const std::string& path, std::string& err,
+                                  bool allow_dev) {
     std::ifstream f(path);
     if (!f) {
         err = "cannot open config: " + path;
@@ -127,7 +130,7 @@ RuntimeConfig RuntimeConfig::load(const std::string& path, std::string& err) {
     std::stringstream ss;
     ss << f.rdbuf();
     try {
-        return from_json(json_parse(ss.str()), err);
+        return from_json(json_parse(ss.str()), err, allow_dev);
     } catch (const std::exception& e) {
         err = "bad config json: " + std::string(e.what());
         return RuntimeConfig();
@@ -141,6 +144,19 @@ Runtime::Runtime(std::unique_ptr<Backend> backend, RuntimeConfig cfg, Writer& wr
     caps_ = backend_->caps();
     max_batch_ = std::max(1, caps_.max_batch);
     cfg_.contexts = std::min(cfg_.contexts, std::max(1, caps_.max_contexts));
+    // §6.12: VBT1 is sent only when dev.raw_tensors=true (already gated by
+    // --dev at config load) and the backend decoder is "raw".
+    if (cfg_.dev.raw_tensors) {
+        std::string decoder_type;
+        try {
+            Json bj = json_parse(cfg_.backend_json);
+            auto d = bj.find("decoder");
+            if (d != bj.end() && d->is_object())
+                decoder_type = d->value("type", std::string());
+        } catch (...) {
+        }
+        dev_active_ = decoder_type == "raw";
+    }
 }
 
 Runtime::~Runtime() { stop(); }
@@ -258,6 +274,10 @@ void Runtime::emit_stats() {
     std::lock_guard<std::mutex> lk(streams_mu_);
     for (auto& kv : streams_) streams.push_back(kv.second->metrics.to_json(kv.first));
     j["streams"] = streams;
+    if (dev_active_) {  // §6.12: status records flag dev mode
+        j["dev_mode"] = true;
+        j["dev_tensor_oversize"] = dev_tensor_oversize_.load();
+    }
     push_reply_record(j);
 }
 
@@ -328,6 +348,12 @@ std::shared_ptr<StreamState> Runtime::add_stream_locked(const StreamSpec& spec,
             err = "stream index already in use: " + std::to_string(spec.index);
             return nullptr;
         }
+        // §6.12: dev mode is limited to dev.max_streams (validated == 1).
+        if (cfg_.dev.raw_tensors &&
+            streams_.size() >= static_cast<size_t>(cfg_.dev.max_streams)) {
+            err = "dev mode allows " + std::to_string(cfg_.dev.max_streams) + " stream";
+            return nullptr;
+        }
     }
     auto src = backend_->create_source(spec, err);
     if (!src) return nullptr;
@@ -339,6 +365,7 @@ std::shared_ptr<StreamState> Runtime::add_stream_locked(const StreamSpec& spec,
     s->ring_cap = cfg_.snapshot_ring;
     s->metrics.record_state("starting", "");
     s->metrics.set_decode_path(src->decode_path());
+    s->dev_limiter.set_max_fps(cfg_.dev.max_fps);
 
     // Analyzers (built-ins by name; "<basename>.so" matches a configured
     // plugin path; an absolute/relative path ending in .so is loaded).
@@ -634,6 +661,35 @@ void Runtime::op_stop(const Json& line) {
 size_t Runtime::stream_count() {
     std::lock_guard<std::mutex> lk(streams_mu_);
     return streams_.size();
+}
+
+void Runtime::maybe_send_dev_tensors(StreamState& s, const FrameBuf& f,
+                                     const DetectionResult& res,
+                                     InferenceContext* ctx) {
+    if (!dev_active_) return;
+    if (!s.dev_limiter.try_send(now_s())) return;  // dev.max_fps per stream
+    auto* raw = dynamic_cast<RawTensorSource*>(ctx);
+    if (!raw) return;  // backend does not expose raw outputs
+    DevTensorFrame tf;
+    tf.stream_index = s.index;
+    tf.seq = f.seq;
+    tf.wall_ms = f.wall_ms;
+    tf.src_w = f.w;
+    tf.src_h = f.h;
+    tf.model_w = res.geom.model_w;
+    tf.model_h = res.geom.model_h;
+    tf.scale = res.geom.scale;
+    tf.pad_x = res.geom.pad_x;
+    tf.pad_y = res.geom.pad_y;
+    tf.align = static_cast<uint8_t>(res.geom.align);
+    if (!raw->last_raw_tensors(tf.tensors)) return;
+    std::vector<uint8_t> rec;
+    std::string err;
+    if (!wire_encode_vbt1(tf, rec, err)) {  // > 16 MiB: drop + count
+        ++dev_tensor_oversize_;
+        return;
+    }
+    writer_.push_event(std::move(rec));  // dev records are never dropped
 }
 
 std::shared_ptr<StreamState> Runtime::stream(uint32_t index) {

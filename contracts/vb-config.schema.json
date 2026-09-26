@@ -154,6 +154,17 @@
         "module": { "type": "string", "minLength": 1 },
         "options": { "type": "object", "default": { "publish_hz": 1.0, "frame_stride": 1 } }
       }
+    },
+    "dev": {
+      "type": "object",
+      "default": { "raw_tensors": false, "max_fps": 1.0, "max_streams": 1 },
+      "additionalProperties": false,
+      "properties": {
+        "raw_tensors": { "type": "boolean", "default": false,
+          "description": "dev mode only: pass raw model output tensors to Python as VBT1 (requires --dev / allow_dev; rejected in production configs)" },
+        "max_fps": { "type": "number", "exclusiveMinimum": 0, "maximum": 2, "default": 1.0 },
+        "max_streams": { "const": 1, "default": 1 }
+      }
     }
   }
 }

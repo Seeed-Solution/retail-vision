@@ -1,4 +1,4 @@
-# vb wire format — VBR1 / VBE1 / VBC1 / VBS1 (spec BASE-1 §6.3)
+# vb wire format — VBR1 / VBE1 / VBC1 / VBS1 / VBT1 (spec BASE-1 §6.3, §6.12)
 
 Transport: `socketpair(AF_UNIX, SOCK_STREAM)`; native side fd given via `--ipc-fd`
 (debug: `--listen <path>` Unix socket). All records are little-endian; the first
@@ -11,7 +11,9 @@ Reference implementations: C++ `core-cpp/vb/src/wire.cpp`
 
 Consistency fixtures: `contracts/fixtures/vb/wire_case{1,2,3}.{json,bin}`
 (case1: 0 detections; case2: 3 detections, no keypoints, 2 attrs per detection;
-case3: 2 detections × 17 keypoints). The C++ encoder must reproduce the `.bin`
+case3: 2 detections × 17 keypoints) and
+`contracts/fixtures/vb/wire_tensor_case1.{json,bin}` (VBT1 dev-mode frame).
+The C++ encoder must reproduce the `.bin`
 byte-for-byte from the `.json`; the Python decoder must produce objects equal
 to the `.json` (float tolerance ≤ 1e-6). Truncated records raise `WireError`.
 
@@ -57,6 +59,50 @@ Body is UTF-8 JSON with an `op` field: `hello`, `reply`, `stats`, `stream_state`
 Body = `u32 json_len` + JSON meta
 (`{"req","stream_index","seq","track_id","w","h","mime"}`) + payload bytes
 (e.g. JPEG).
+
+## VBT1 — raw tensor frame (native → Python, dev mode only; spec §6.12)
+
+Sent only in dev mode (`dev.raw_tensors=true` + `--dev`, `VB_PRODUCTION`
+unset) when `backend.decoder.type == "raw"`; rate-limited to `dev.max_fps`
+(≤ 2) per stream, limited to `dev.max_streams == 1` stream, and capped at
+16 MiB per record (oversized records are dropped and counted in stats as
+`dev_tensor_oversize`). A reader that is not in dev mode treats VBT1 as an
+unknown magic (log error, close connection), per §6.4.
+
+| offset | type | field |
+|---|---|---|
+| 0 | char[4] | `VBT1` |
+| 4 | u32 | body_len |
+| 8 | u32 | stream_index |
+| 12 | u64 | seq |
+| 20 | f64 | wall_ms |
+| 28 | i32×4 | src_w, src_h, model_w, model_h |
+| 44 | f32×3 | scale, pad_x, pad_y (letterbox geom, as VBR1) |
+| 56 | u8 | align (0 = center, 1 = top-left) |
+| 57 | u8×3 | reserved = 0 |
+| 60 | u16 | n_tensors |
+| 62 | u16 | reserved = 0 |
+| 64 | n_tensors × tensor | see below |
+
+Per tensor (batch dimension removed, ≤ 4 dims):
+
+| offset | type | field |
+|---|---|---|
+| 0 | u8 | dtype (0 = f32 little-endian; 1–255 reserved) |
+| 1 | u8 | n_dims (0–4) |
+| 2 | u8 | nhwc (0/1; 1 = channel-last layout) |
+| 3 | u8 | reserved = 0 |
+| 4 | i32×4 | dims (zero-padded; only the first n_dims entries are meaningful) |
+| 20 | f32 | scale (dequant scale; 1.0 for f32) |
+| 24 | i32 | zero_point |
+| 28 | u16 | name_len |
+| 30 | u8×name_len | name (UTF-8, may be empty) |
+| … | u32 | data_len |
+| … | u8×data_len | data (row-major) |
+
+Fixture: `wire_tensor_case1.json` carries tensor bytes as `data_hex` plus a
+`data_f32` readability copy; the C++ encoder reproduces `.bin` byte-for-byte
+(`test_dev_tensor`).
 
 ## Python → native control lines
 
