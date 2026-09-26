@@ -9,9 +9,12 @@ import json
 import struct
 from typing import Any
 
+from .types import LetterboxGeom, RawTensor, TensorFrame
+
 __all__ = ["WireError", "HEADER", "MAGIC_FRAME", "MAGIC_EVENT", "MAGIC_CONTROL",
-           "MAGIC_SNAPSHOT", "decode_header", "decode_result", "decode_event",
-           "decode_snapshot", "encode_control_line"]
+           "MAGIC_SNAPSHOT", "MAGIC_TENSOR", "decode_header", "decode_result",
+           "decode_event", "decode_snapshot", "decode_tensors",
+           "encode_control_line"]
 
 
 class WireError(Exception):
@@ -25,11 +28,20 @@ HEADER = struct.Struct("<4sI")  # char[4] magic + u32 body_len (excludes header)
 _BODY = struct.Struct("<IQd4i3fBBHffBBH")
 _DET = struct.Struct("<5fiI")          # cx, cy, w, h, score, class_id, track_id
 _KPT = struct.Struct("<3f")
+# VBT1 fixed part (spec §6.12): stream_index, seq, wall_ms, src/model w/h,
+# scale/pads, u8 align + 3 reserved, u16 n_tensors + u16 reserved.
+_TBODY = struct.Struct("<IQd4i3fB3xHH")
+# VBT1 per-tensor fixed part: dtype, n_dims, nhwc, reserved, 4 dims, scale,
+# zero_point.
+_TTENSOR = struct.Struct("<BBBB4ifi")
 
 MAGIC_FRAME = b"VBR1"
 MAGIC_EVENT = b"VBE1"
 MAGIC_CONTROL = b"VBC1"
 MAGIC_SNAPSHOT = b"VBS1"
+MAGIC_TENSOR = b"VBT1"   # dev mode only (§6.12)
+
+_ALIGN_NAMES = {0: "center", 1: "top_left"}
 
 
 def decode_header(hdr: bytes) -> tuple[bytes, int]:
@@ -37,7 +49,8 @@ def decode_header(hdr: bytes) -> tuple[bytes, int]:
     if len(hdr) < HEADER.size:
         raise WireError(f"truncated header: {len(hdr)} bytes")
     magic, body_len = HEADER.unpack_from(hdr, 0)
-    if magic not in (MAGIC_FRAME, MAGIC_EVENT, MAGIC_CONTROL, MAGIC_SNAPSHOT):
+    if magic not in (MAGIC_FRAME, MAGIC_EVENT, MAGIC_CONTROL, MAGIC_SNAPSHOT,
+                     MAGIC_TENSOR):
         raise WireError(f"bad magic {magic!r}")
     return magic, body_len
 
@@ -106,6 +119,51 @@ def decode_snapshot(body: bytes) -> tuple[dict[str, Any], bytes]:
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise WireError(f"bad VBS1 meta: {e}") from e
     return meta, bytes(body[4 + json_len:])
+
+
+def decode_tensors(body: bytes) -> TensorFrame:
+    """Decode a VBT1 body into a TensorFrame (stream_id filled by the shard;
+    spec §6.12 layout)."""
+    if len(body) < _TBODY.size:
+        raise WireError(f"truncated VBT1 body: {len(body)} < {_TBODY.size}")
+    (stream_index, seq, wall_ms, src_w, src_h, model_w, model_h,
+     scale, pad_x, pad_y, align, n_tensors, _r) = _TBODY.unpack_from(body, 0)
+    geom = LetterboxGeom(
+        src_w=src_w, src_h=src_h, model_w=model_w, model_h=model_h,
+        scale=scale, pad_x=pad_x, pad_y=pad_y,
+        align=_ALIGN_NAMES.get(align, "center"))
+    offset = _TBODY.size
+    tensors: list[RawTensor] = []
+    for _ in range(n_tensors):
+        if len(body) - offset < _TTENSOR.size:
+            raise WireError("truncated VBT1 tensor header")
+        dtype, n_dims, nhwc, _r, d0, d1, d2, d3, t_scale, zero_point = \
+            _TTENSOR.unpack_from(body, offset)
+        offset += _TTENSOR.size
+        if n_dims > 4:
+            raise WireError(f"bad VBT1 n_dims {n_dims}")
+        (name_len,) = struct.unpack_from("<H", body, offset)
+        offset += 2
+        if len(body) - offset < name_len:
+            raise WireError("truncated VBT1 tensor name")
+        name = body[offset:offset + name_len].decode("utf-8", "replace")
+        offset += name_len
+        if len(body) - offset < 4:
+            raise WireError("truncated VBT1 tensor data length")
+        (data_len,) = struct.unpack_from("<I", body, offset)
+        offset += 4
+        if len(body) - offset < data_len:
+            raise WireError("truncated VBT1 tensor data")
+        data = bytes(body[offset:offset + data_len])
+        offset += data_len
+        dims_all = (d0, d1, d2, d3)
+        tensors.append(RawTensor(
+            name=name, dtype=dtype, dims=tuple(dims_all[:n_dims]),
+            scale=t_scale, zero_point=zero_point, nhwc=bool(nhwc), data=data))
+    tf = TensorFrame(stream_id="", seq=seq, wall_ms=wall_ms, geom=geom,
+                     tensors=tensors)
+    tf.stream_index = stream_index      # transient; shard maps it to stream_id
+    return tf
 
 
 def encode_control_line(msg: dict[str, Any]) -> bytes:

@@ -19,6 +19,7 @@ DECODER_KEYS = {"type", "num_classes", "reg_max", "strides", "keypoints",
 TOP_LEVEL_KEYS = {
     "schema", "device_id", "backend", "runtime", "native", "state_dir",
     "tracker", "analyzers", "mqtt", "health", "streams_file", "streams", "app",
+    "dev",
 }
 
 DEFAULTS: dict = {
@@ -41,6 +42,7 @@ DEFAULTS: dict = {
     "streams_file": "",
     "streams": [],
     "app": {"name": "echo", "options": {"publish_hz": 1.0, "frame_stride": 1}},
+    "dev": {"raw_tensors": False, "max_fps": 1.0, "max_streams": 1},
 }
 
 
@@ -63,6 +65,7 @@ class BaseConfig:
     streams_file: str
     streams: list
     app: dict
+    dev: dict = field(default_factory=dict)
     source_path: str = ""
 
 
@@ -191,12 +194,36 @@ def _check_decoder(backend: dict, tracker: dict, data: dict) -> None:
         _err("backend.decoder", "classify decoder requires tracker.enabled=false")
 
 
-def _validate(data: dict, *, partial: bool = False) -> None:
+def _check_dev(data: dict, *, allow_dev: bool) -> None:
+    """§6.12 top-level `dev` object (dev-mode raw tensor passthrough)."""
+    dev = data.get("dev")
+    if dev is None:
+        return
+    if not isinstance(dev, dict):
+        _err("dev", "must be an object")
+    for k in dev:
+        if k not in ("raw_tensors", "max_fps", "max_streams"):
+            _err(f"dev.{k}", "unknown dev key")
+    merged = _merge(DEFAULTS["dev"], dev)
+    if not isinstance(merged["raw_tensors"], bool):
+        _err("dev.raw_tensors", "must be a boolean")
+    if merged["raw_tensors"] and not allow_dev:
+        raise ConfigError("dev.raw_tensors is not allowed in production configs")
+    _check_num(merged["max_fps"], "dev.max_fps")
+    if not 0 < merged["max_fps"] <= 2:
+        _err("dev.max_fps", "must be in (0, 2]")
+    _check_int(merged["max_streams"], "dev.max_streams", minimum=1)
+    if merged["max_streams"] != 1:
+        _err("dev.max_streams", "must be 1")
+
+
+def _validate(data: dict, *, partial: bool = False, allow_dev: bool = False) -> None:
     if not isinstance(data, dict):
         _err("$", "top level must be an object")
     for key in data:
         if key not in TOP_LEVEL_KEYS:
             _err(key, "unknown top-level key")
+    _check_dev(data, allow_dev=allow_dev)
 
     _require(data, "schema", "schema")
     if data.get("schema") != SCHEMA_ID:
@@ -349,15 +376,16 @@ def _validate(data: dict, *, partial: bool = False) -> None:
              f"< {len(streams)} streams")
 
 
-def load(path: str, *, partial: bool = False) -> BaseConfig:
+def load(path: str, *, partial: bool = False, allow_dev: bool = False) -> BaseConfig:
     """Load, merge defaults, validate and return a BaseConfig.
 
     ``partial=True`` (§6.6): do not require ``mqtt``/``app`` — for
-    ``vision_base.embed`` (§6.13.1).
+    ``vision_base.embed`` (§6.13.1). ``allow_dev=True`` (§6.12): permit
+    ``dev.raw_tensors=true`` (dev mode only, e.g. ``main --dev``).
     """
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    _validate(data, partial=partial)
+    _validate(data, partial=partial, allow_dev=allow_dev)
     merged = _merge(DEFAULTS, data)
     # streams_file (if the file exists) overrides `streams` (§6.6).
     if merged["streams_file"] and os.path.exists(merged["streams_file"]):
@@ -366,7 +394,7 @@ def load(path: str, *, partial: bool = False) -> BaseConfig:
         if not isinstance(streams, list):
             _err("streams_file", "content must be an array of stream objects")
         merged["streams"] = streams
-        _validate(merged, partial=partial)
+        _validate(merged, partial=partial, allow_dev=allow_dev)
     return BaseConfig(
         schema=merged["schema"], device_id=merged["device_id"],
         backend=merged["backend"], runtime=merged["runtime"],
@@ -374,7 +402,7 @@ def load(path: str, *, partial: bool = False) -> BaseConfig:
         tracker=merged["tracker"], analyzers=merged["analyzers"],
         mqtt=merged["mqtt"], health=merged["health"],
         streams_file=merged["streams_file"], streams=merged["streams"],
-        app=merged["app"], source_path=str(path),
+        app=merged["app"], dev=merged["dev"], source_path=str(path),
     )
 
 
@@ -384,10 +412,15 @@ def runtime_config(cfg: BaseConfig, shard_index: int) -> dict:
     Streams are always delivered via `add` control lines, never via this file.
     """
     _check_int(shard_index, "shard_index", minimum=0)
-    return {
+    out = {
         "backend": copy.deepcopy(cfg.backend),
         "contexts_per_worker": cfg.runtime["contexts_per_worker"],
         "tracker": copy.deepcopy(cfg.tracker),
         "analyzers": {"plugins": list(cfg.analyzers.get("plugins", []))},
         "snapshot_ring": cfg.native.get("snapshot_ring", 2),
     }
+    if cfg.dev.get("raw_tensors"):
+        # §6.12: the native child reads dev limits (max_fps / max_streams)
+        # from this file; include `dev` only in dev mode.
+        out["dev"] = copy.deepcopy(cfg.dev)
+    return out

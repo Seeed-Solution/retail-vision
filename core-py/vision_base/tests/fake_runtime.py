@@ -76,6 +76,16 @@ def encode_frame(idx: int, seq: int) -> bytes:
     return head + dets
 
 
+def encode_vbt1(idx: int, seq: int) -> bytes:
+    """One small VBT1 record (§6.12): a single f32 tensor [2, 2]."""
+    data = struct.pack("<4f", 1.0, 2.0, 3.0, 4.0)
+    t = struct.pack("<BBBB4ifi", 0, 2, 0, 0, 2, 2, 0, 0, 1.0, 0)
+    t += struct.pack("<H", 4) + b"out0" + struct.pack("<I", len(data)) + data
+    head = struct.pack("<IQd4i3fB3xHH", idx, seq, time.time() * 1000.0,
+                       320, 240, 416, 416, 1.3, 0.0, 52.0, 0, 1, 0)
+    return head + t
+
+
 _seq_lock = threading.Lock()
 _seqs: dict[int, int] = {}
 
@@ -113,6 +123,8 @@ def handle_line(line: bytes) -> None:
         idx = int(msg["stream"]["index"])
         send_reply(req, True, {"stream_index": idx})
         send_state(idx, "starting")
+        if os.environ.get("FAKE_DEV_TENSORS"):
+            send_record(b"VBT1", encode_vbt1(idx, 1))
         send_state(idx, "running")
         emit_frames(idx, float(os.environ.get("FAKE_FPS", "20") or 20))
     elif op == "remove":

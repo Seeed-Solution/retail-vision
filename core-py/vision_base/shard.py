@@ -59,6 +59,12 @@ class Shard:
         self.hello = None
         self.last_error = ""
 
+        # §6.12 dev mode: VBT1 records are accepted only when the runtime was
+        # started with --dev (main.py --dev) and the app defines on_tensors;
+        # otherwise the client treats a VBT1 record as a protocol error.
+        self.has_tensors_hook = ("--dev" in self.runtime_argv and
+                                 getattr(hooks, "on_tensors", None) is not None)
+
         self._client: RuntimeClient | None = None
         self._cfg_path = ""
         self._mu = threading.Lock()          # client lifecycle transitions
@@ -121,7 +127,9 @@ class Shard:
                                on_event=self._on_event,
                                on_stats=self._on_stats,
                                on_state=self._on_state,
-                               on_exit=self._on_exit)
+                               on_exit=self._on_exit,
+                               on_tensors=self._on_tensors
+                               if self.has_tensors_hook else None)
         try:
             hello = client.start(self.hello_timeout_s)
         except (TimeoutError, RuntimeGone):
@@ -224,6 +232,16 @@ class Shard:
 
     def _on_stats(self, stats: dict) -> None:
         self.last_stats = stats
+
+    def _on_tensors(self, idx: int, tf) -> None:
+        """§6.12: fill stream_id, queue for the hook thread."""
+        ctx = self.contexts.get(idx)
+        if ctx is None:
+            return
+        tf.stream_id = ctx.stream_id
+        with self._cv:
+            self._fifo.append(("tensors", idx, tf))
+            self._cv.notify()
 
     def _on_state(self, idx: int, state: str, error: str) -> None:
         with self._cv:
@@ -337,6 +355,12 @@ class Shard:
             outs = self._call_hook(self.hooks.on_event, ctx, item[2]) or []
             for o in outs:
                 self._publish(ctx, o)
+        elif kind == "tensors":
+            fn = getattr(self.hooks, "on_tensors", None)
+            if fn is not None:
+                outs = self._call_hook(fn, ctx, item[2]) or []
+                for o in outs:
+                    self._publish(ctx, o)
 
     def _deliver_frame(self, ctx, res) -> None:
         if ctx is None:

@@ -5,7 +5,8 @@ computation lives here.
 """
 __version__ = "0.1.0"
 
-from .types import Detection, Event, FrameResult, Hello, LetterboxGeom, StreamSpec
+from .types import (Detection, Event, FrameResult, Hello, LetterboxGeom,
+                    RawTensor, StreamSpec, TensorFrame)
 from .runtime_client import RuntimeClient, RuntimeError_, RuntimeGone
 from .hooks import AppHooks, ConfigureError, EchoApp, Outgoing, StreamContext
 from .apps import ConfigApp
@@ -15,6 +16,8 @@ from .health import HealthServer, build_healthz
 
 __all__ = [
     "LetterboxGeom",
+    "RawTensor",
+    "TensorFrame",
     "Detection",
     "FrameResult",
     "Event",

@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import itertools
 import socket
+import struct
 import subprocess
 import threading
 from typing import Callable
 
 from . import wire
-from .types import Detection, Event, FrameResult, Hello, LetterboxGeom
+from .types import Detection, Event, FrameResult, Hello, LetterboxGeom, TensorFrame
 
 __all__ = ["RuntimeError_", "RuntimeGone", "RuntimeClient"]
 
@@ -46,7 +47,8 @@ class RuntimeClient:
                  on_event: Callable[[int, Event], None],
                  on_stats: Callable[[dict], None],
                  on_state: Callable[[int, str, str], None],
-                 on_exit: Callable[[int], None]):
+                 on_exit: Callable[[int], None],
+                 on_tensors: Callable[[int, TensorFrame], None] | None = None):
         # argv template: occurrences of "{fd}" are replaced by the child's
         # socketpair fd; "--config <runtime_cfg_path>" is appended.
         self.argv = list(argv)
@@ -56,6 +58,10 @@ class RuntimeClient:
         self.on_stats = on_stats
         self.on_state = on_state
         self.on_exit = on_exit
+        # Dev mode (§6.12): VBT1 records are accepted only when a tensor
+        # callback is registered; otherwise they close the connection.
+        self.on_tensors = on_tensors
+        self.last_wire_error = ""
         self.proc: subprocess.Popen | None = None
         self.hello: Hello | None = None
         self._sock: socket.socket | None = None
@@ -263,6 +269,33 @@ class RuntimeClient:
                 if entry is not None:
                     entry.data = (meta, jpeg)
                     entry.event.set()
+        elif magic == wire.MAGIC_TENSOR:
+            self._dispatch_tensor(body)
+
+    def _dispatch_tensor(self, body: bytes) -> None:
+        """§6.12: VBT1 outside dev mode = unknown magic -> error + close."""
+        if self.on_tensors is None:
+            self.last_wire_error = "unexpected VBT1 record outside dev mode"
+            try:
+                if len(body) < 4:
+                    raise wire.WireError("truncated VBT1 body")
+                stream_index = struct.unpack_from("<I", body, 0)[0]
+            except wire.WireError:
+                stream_index = 0
+            try:
+                self.on_state(stream_index, "error", self.last_wire_error)
+            except Exception:
+                pass
+            sock = self._sock
+            self._sock = None
+            if sock is not None:
+                try:
+                    sock.close()      # reader loop exits via EOF/OSError
+                except OSError:
+                    pass
+            return
+        tf = wire.decode_tensors(body)
+        self.on_tensors(tf.stream_index, tf)   # type: ignore[attr-defined]
 
     def _dispatch_control(self, obj: dict) -> None:
         op = obj.get("op")
