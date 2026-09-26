@@ -73,5 +73,7 @@ ENV PYTHONPATH=/opt/vb/py \
     LD_LIBRARY_PATH=/opt/vb/bin:/opt/onnxruntime/lib \
     VB_PRODUCTION=1
 
-# vb-runtime is the primary entrypoint; apps override as needed.
-ENTRYPOINT ["/opt/vb/bin/vb-runtime"]
+# Default entrypoint is the Python orchestrator, so `docker run <img> --config x`
+# runs a config-only app (docs/quickstart.md). Standalone mode without Python:
+# `--entrypoint /opt/vb/bin/vb-runtime <img> --standalone --config x`.
+ENTRYPOINT ["python3", "-m", "vision_base.main"]
