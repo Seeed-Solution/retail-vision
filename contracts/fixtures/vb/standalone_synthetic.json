@@ -1,0 +1,28 @@
+{
+  "schema": "vb.config/1",
+  "device_id": "synthetic-dev",
+  "backend": {"name": "synthetic", "model_w": 640, "model_h": 640, "boxes": 3, "infer_ms": 0},
+  "runtime": {"contexts_per_worker": 1, "open_timeout_s": 5, "reconnect_delay_s": 1},
+  "tracker": {"max_misses": 15},
+  "analyzers": {"plugins": []},
+  "streams": [
+    {
+      "stream_id": "cam-a",
+      "url": "synthetic://?fps=15&boxes=3&w=320&h=240",
+      "options": {
+        "analyzers": [
+          {"name": "zone", "config": {"zones": [{"id": "all", "polygon": [[0, 0], [1, 0], [1, 1], [0, 1]]}]}}
+        ]
+      }
+    },
+    {
+      "stream_id": "cam-b",
+      "url": "synthetic://?fps=15&boxes=3&w=320&h=240",
+      "options": {
+        "analyzers": [
+          {"name": "zone", "config": {"zones": [{"id": "all", "polygon": [[0, 0], [1, 0], [1, 1], [0, 1]]}]}}
+        ]
+      }
+    }
+  ]
+}
