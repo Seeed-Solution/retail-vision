@@ -94,3 +94,47 @@ jobs:
             echo "--- $f"
             STREAMS=placeholder docker compose -f "$f" config -q
           done
+
+  # BASE-1 (vision-base): native core + Python orchestration layer + the
+  # §10.5 hot-path lint. Everything here is the shared CPU platform; the
+  # accelerated backends need hardware and are validated on the fleet.
+  vision-base:
+    name: vision-base (core-cpp + vision_base + hotpath lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake pkg-config build-essential \
+            libturbojpeg0-dev libssl-dev
+
+      - name: ONNX Runtime 1.20.1 (x64, sha256 pinned)
+        run: |
+          curl -fsSL -o /tmp/ort.tgz \
+            https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
+          echo "67db4dc1561f1e3fd42e619575c82c601ef89849afc7ea85a003abbac1a1a105  /tmp/ort.tgz" | sha256sum -c -
+          sudo mkdir -p /opt/onnxruntime
+          sudo tar -xzf /tmp/ort.tgz -C /opt/onnxruntime --strip-components=1
+
+      # VB_BUILD_CPU (spec §8): native core + cpu backend, tests on.
+      - name: Native build + ctest
+        run: |
+          cmake -S core-cpp/vb -B build/vb -DCMAKE_BUILD_TYPE=Release \
+            -DVB_BACKENDS="cpu" -DVB_WITH_GST=OFF -DVB_WITH_JPEG=ON -DVB_WITH_TLS=ON \
+            -DVB_TESTS=ON -DORT_ROOT=/opt/onnxruntime
+          cmake --build build/vb -j"$(nproc)"
+          ctest --test-dir build/vb --output-on-failure
+
+      - name: Python tests
+        run: |
+          uv sync
+          uv run pytest -q
+
+      # §10.5 ① static guard: no per-frame computation in the Python layer.
+      - name: Hot-path lint
+        run: uv run python tools/vb_hotpath_lint.py --mode core core-py/vision_base
