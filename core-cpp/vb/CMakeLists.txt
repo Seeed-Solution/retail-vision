@@ -14,7 +14,10 @@ set(ORT_ROOT "/opt/onnxruntime" CACHE PATH "ONNX Runtime install root (cpu backe
 
 find_package(Threads REQUIRED)
 
-add_library(vb_core STATIC
+# §6.13.2 (M1.24): vb_algo — installable compute-only static library
+# (letterbox, tracker, analyzers incl. plugin loader, wire, post, geom2d).
+# No frame sources, no thread pool, no backends, no ORT/GStreamer.
+add_library(vb_algo STATIC
     src/letterbox.cpp
     src/json.cpp
     src/wire.cpp
@@ -22,12 +25,6 @@ add_library(vb_core STATIC
     src/analyzers/line_cross.cpp
     src/analyzers/zone.cpp
     src/analyzers/plugin_loader.cpp
-    src/latest_frame.cpp
-    src/writer.cpp
-    src/stats.cpp
-    src/pool.cpp
-    src/runtime.cpp
-    src/backend_registry.cpp
     src/geom2d.cpp
     src/post/nms.cpp
     src/post/yolox_decode.cpp
@@ -40,6 +37,27 @@ add_library(vb_core STATIC
     src/analyzers/direction.cpp
     src/analyzers/count_threshold.cpp
     src/analyzers/pose_angle.cpp
+)
+add_library(vb::algo ALIAS vb_algo)
+set_target_properties(vb_algo PROPERTIES EXPORT_NAME algo)
+target_compile_features(vb_algo PUBLIC cxx_std_17)
+target_include_directories(vb_algo PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party>
+    $<INSTALL_INTERFACE:include>
+    $<INSTALL_INTERFACE:include/vb/third_party>)
+target_include_directories(vb_algo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(vb_algo PUBLIC ${CMAKE_DL_LIBS})
+
+# vb_runtime library: frame sources, pool/runtime scheduling, output
+# adapters; links the compute-only vb_algo instead of recompiling sources.
+add_library(vb_core STATIC
+    src/latest_frame.cpp
+    src/writer.cpp
+    src/stats.cpp
+    src/pool.cpp
+    src/runtime.cpp
+    src/backend_registry.cpp
     src/sources/synthetic.cpp
     src/dev_tensor.cpp
     src/snapshot.cpp
@@ -49,11 +67,9 @@ add_library(vb_core STATIC
     src/out/mqtt_lite.cpp
 )
 target_include_directories(vb_core PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-target_link_libraries(vb_core PUBLIC ${CMAKE_DL_LIBS} Threads::Threads)
+target_link_libraries(vb_core PUBLIC vb_algo ${CMAKE_DL_LIBS} Threads::Threads)
 
 # §6.10.3: TLS is a compile option (default ON, OpenSSL >= 1.1.1); it backs
 # the MQTT TLS transport in src/out/mqtt_lite.cpp and the tls:on|off marker
@@ -103,6 +119,16 @@ target_link_libraries(vb-runtime PRIVATE vb_core)
 if(VB_WITH_TLS AND OpenSSL_FOUND)
     target_compile_definitions(vb-runtime PRIVATE VB_WITH_TLS=1)
 endif()
+
+# ---- vb_algo install/export (spec BASE-1 §6.13.2, M1.24) ----
+include(CMakePackageConfigHelpers)
+install(TARGETS vb_algo EXPORT vbTargets ARCHIVE DESTINATION lib)
+install(DIRECTORY include/vb DESTINATION include)
+install(FILES third_party/nlohmann/json.hpp DESTINATION include/vb/third_party/nlohmann)
+install(EXPORT vbTargets NAMESPACE vb:: DESTINATION lib/cmake/vb)
+configure_package_config_file(cmake/vbConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/vbConfig.cmake INSTALL_DESTINATION lib/cmake/vb)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/vbConfig.cmake DESTINATION lib/cmake/vb)
 
 
 # Tests must be enabled before the backend subdirectories add theirs.
