@@ -5,10 +5,12 @@
 // tracker.enabled=false for this decoder (M1.15b).
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <string>
 #include <vector>
 
+#include "post/tensor_check.h"
 #include "vb/decoder.h"
 
 namespace vb {
@@ -24,7 +26,12 @@ public:
                 float score, float nms_th, DetectionResult& out,
                 std::string& err) override {
         (void)nms_th;  // full-frame boxes: NMS would collapse them
-        if (n != 1 || outs[0].dims.size() != 1) {
+        if (outs == nullptr || n != 1) {
+            err = "classify decoder expects one [nc] output vector";
+            return false;
+        }
+        if (!post_detail::check_view(outs[0], "classify decoder", err)) return false;
+        if (outs[0].dims.size() != 1) {
             err = "classify decoder expects one [nc] output vector";
             return false;
         }
@@ -45,6 +52,16 @@ public:
             }
             for (float& v : p) v /= sum;
         }
+        // Non-finite scores are dropped (they cannot be compared against the
+        // threshold) and demoted to -inf so the sort keeps a strict weak
+        // ordering. Their count is reported through err.
+        size_t dropped = 0;
+        for (float& v : p) {
+            if (!std::isfinite(v)) {
+                v = -std::numeric_limits<float>::infinity();
+                ++dropped;
+            }
+        }
         std::vector<int> order(nc);
         std::iota(order.begin(), order.end(), 0);
         std::stable_sort(order.begin(), order.end(),
@@ -53,7 +70,7 @@ public:
         out.kpts.clear();
         for (int k = 0; k < spec_.top_k && k < nc; ++k) {
             int cid = order[k];
-            if (p[cid] <= score) break;
+            if (!std::isfinite(p[cid]) || p[cid] <= score) break;
             Detection d;
             d.cx = 0.5f;
             d.cy = 0.5f;
@@ -64,6 +81,7 @@ public:
             d.track_id = 0;
             out.dets.push_back(d);
         }
+        post_detail::note_dropped(err, "classify decoder", dropped);
         return true;
     }
 

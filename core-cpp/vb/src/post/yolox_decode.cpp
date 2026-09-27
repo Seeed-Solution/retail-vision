@@ -1,4 +1,11 @@
 // YOLOX head decode (spec BASE-1 §6.1/§6.11, M1.9).
+//
+// Non-finite rows (NaN/inf box or score, which walk past the `score <=
+// threshold` test) are dropped: this function's §6.1 signature has no error
+// channel, so the drop is not reported here. Input buffer validation lives in
+// the caller (YoloXDecoder::decode in decoder.cpp, which does have one).
+#include <cmath>
+
 #include "vb/post.h"
 
 namespace vb {
@@ -18,6 +25,9 @@ void yolox_decode(const float* out, int n_anchors, int n_cls, int model_w, int m
             }
         }
         float sc = obj * best_cls;
+        if (!std::isfinite(sc) || !std::isfinite(p[0]) || !std::isfinite(p[1]) ||
+            !std::isfinite(p[2]) || !std::isfinite(p[3]))
+            continue;  // D4: never emit non-finite detections
         if (sc <= score) continue;
         Detection d;
         d.cx = (p[0] + p[2]) / 2.0f / static_cast<float>(model_w);

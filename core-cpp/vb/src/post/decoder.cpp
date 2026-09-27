@@ -2,6 +2,7 @@
 #include <cmath>
 #include <string>
 
+#include "post/tensor_check.h"
 #include "vb/decoder.h"
 #include "vb/json.h"
 #include "vb/post.h"
@@ -19,7 +20,14 @@ public:
     bool decode(const TensorView* outs, size_t n, int model_w, int model_h,
                 float score, float nms_th, DetectionResult& out,
                 std::string& err) override {
-        if (n != 1 || outs[0].dims.size() != 2) {
+        if (outs == nullptr || n != 1) {
+            err = "yolox decoder expects one [N, 5+nc] output tensor";
+            return false;
+        }
+        if (!post_detail::check_canvas(model_w, model_h, "yolox decoder", err))
+            return false;
+        if (!post_detail::check_view(outs[0], "yolox decoder", err)) return false;
+        if (outs[0].dims.size() != 2) {
             err = "yolox decoder expects one [N, 5+nc] output tensor";
             return false;
         }
@@ -121,6 +129,10 @@ bool parse_spec(const Json& j, DecodeSpec& s, std::string& err) {
 // Implemented in yolov8_decode.cpp / classify.cpp.
 std::unique_ptr<Decoder> make_yolov8_decoder(DecodeSpec s);
 std::unique_ptr<Decoder> make_yolov8_dfl_decoder(DecodeSpec s);
+// yolo_pose validates `keypoints` itself: it is the only parameter that
+// decides the shape of the keypoint head, so a zero/absent value is an error
+// rather than a silently keypoint-less pose decoder.
+std::unique_ptr<Decoder> make_yolo_pose_decoder(DecodeSpec s, std::string& err);
 std::unique_ptr<Decoder> make_classify_decoder(DecodeSpec s);
 
 std::unique_ptr<Decoder> make_decoder(const std::string& decoder_json,
@@ -148,6 +160,7 @@ std::unique_ptr<Decoder> make_decoder(const std::string& decoder_json,
     if (spec.type == "yolox") return std::make_unique<YoloXDecoder>(spec);
     if (spec.type == "yolov8") return make_yolov8_decoder(std::move(spec));
     if (spec.type == "yolov8_dfl") return make_yolov8_dfl_decoder(std::move(spec));
+    if (spec.type == "yolo_pose") return make_yolo_pose_decoder(std::move(spec), err);
     if (spec.type == "classify") return make_classify_decoder(std::move(spec));
     if (spec.type == "raw") return std::make_unique<RawDecoder>();
     err = "decoder: unknown type " + spec.type;
