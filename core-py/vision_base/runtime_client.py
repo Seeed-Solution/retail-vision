@@ -9,6 +9,7 @@ thread (§6.5.1). Calling ``request`` on the reader thread raises RuntimeError.
 from __future__ import annotations
 
 import itertools
+import re
 import socket
 import struct
 import subprocess
@@ -30,6 +31,27 @@ class RuntimeGone(Exception):
 
 
 _ALIGN = {0: "center", 1: "top_left"}
+
+
+def _major_minor(version: str) -> tuple[int, int]:
+    m = re.match(r"^(\d+)\.(\d+)", version)
+    if m is None:
+        raise RuntimeError_(
+            f"runtime_version {version!r} is not a valid semver string")
+    return int(m.group(1)), int(m.group(2))
+
+
+def check_runtime_version(runtime_version: str) -> None:
+    """§6.14: runtime and vision_base must agree on major.minor.
+
+    The patch level may differ (0.1.0 vs 0.1.3 is fine); a major or minor
+    mismatch is a breaking combination and ``start`` must fail fast.
+    """
+    from . import __version__   # lazy: runtime_client is imported by __init__
+    if _major_minor(runtime_version) != _major_minor(__version__):
+        raise RuntimeError_(
+            f"runtime_version {runtime_version} is incompatible with "
+            f"vision_base {__version__} (major.minor mismatch, §6.14)")
 
 
 class _Reply:
@@ -97,6 +119,11 @@ class RuntimeClient:
             # full timeout.
             self.kill()
             raise RuntimeGone("runtime exited before hello")
+        try:
+            check_runtime_version(self.hello.runtime_version)
+        except RuntimeError_:
+            self.kill()
+            raise
         return self.hello  # type: ignore[return-value]
 
     @property

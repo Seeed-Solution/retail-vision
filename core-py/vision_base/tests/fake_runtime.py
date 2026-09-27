@@ -9,6 +9,9 @@ snapshots. Behaviour knobs come from the environment:
 - ``FAKE_CRASH_AFTER=N``: os._exit(1) once more than N control lines were read.
 - ``FAKE_FPS``: frame emission rate per stream (default 20).
 - ``FAKE_STATS=1``: emit one stats record per second.
+- ``FAKE_VERSION``: override the hello ``runtime_version`` (default
+  ``0.1.0-fake``); a major/minor mismatch with ``vision_base`` makes
+  ``RuntimeClient.start`` raise ``RuntimeError_`` (§6.14, M1.26).
 
 Usage: ``python fake_runtime.py --ipc-fd N``
 """
@@ -45,7 +48,10 @@ def send_control(obj: dict) -> None:
 
 
 def send_hello() -> None:
-    send_control({"op": "hello", "runtime_version": "0.1.0-fake", "abi": 1,
+    send_control({"op": "hello",
+                  "runtime_version": os.environ.get("FAKE_VERSION",
+                                                    "0.1.0-fake"),
+                  "abi": 1,
                   "backend": "fake", "caps": {"max_contexts": 2, "max_batch": 1,
                                               "keypoints": 0,
                                               "exclusive_device": False},

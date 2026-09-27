@@ -1,0 +1,337 @@
+{
+ "abi": {
+  "VB_ANALYZER_ABI": 1,
+  "functions": [
+   "const vb_analyzer_api* vb_analyzer_entry(void);"
+  ],
+  "structs": {
+   "vb_analyzer_api": [
+    "uint32_t abi",
+    "const char* name",
+    "uint32_t attr_count",
+    "const char* const* attr_names",
+    "void* (*create)(const char* config_json, char* err, size_t errlen)",
+    "void (*destroy)(void* self)",
+    "int (*on_frame)(void* self, const vb_frame_meta* m, const vb_track* tracks, size_t n, float* attrs_out, vb_emit_fn emit, void* sink)",
+    "void (*on_track_removed)(void* self, uint32_t track_id, double t_mono_s)"
+   ],
+   "vb_frame_meta": [
+    "uint32_t stream_index",
+    "uint64_t seq",
+    "double wall_ms, t_mono_s",
+    "int32_t src_w, src_h, model_w, model_h",
+    "float scale, pad_x, pad_y",
+    "uint8_t align"
+   ],
+   "vb_track": [
+    "uint32_t track_id",
+    "float cx, cy, w, h, score",
+    "int32_t class_id",
+    "float vx, vy",
+    "uint32_t hits, misses",
+    "const float* kpts",
+    "uint32_t kpt_count"
+   ]
+  }
+ },
+ "analyzers": {
+  "count": {
+   "count_ten": [
+    "frames"
+   ]
+  },
+  "count_threshold": {
+   "count_over": [
+    "count",
+    "limit",
+    "zone_id"
+   ],
+   "count_under": [
+    "count",
+    "limit",
+    "zone_id"
+   ]
+  },
+  "direction": {
+   "wrong_way": [
+    "angle_deg",
+    "class_id",
+    "diff_deg",
+    "expected_deg",
+    "score",
+    "travel",
+    "zone_id"
+   ],
+   "wrong_way_end": [
+    "duration_s"
+   ]
+  },
+  "dwell": {
+   "dwell_end": [
+    "dwell_s",
+    "reason"
+   ],
+   "dwell_start": [
+    "anchor",
+    "class_id",
+    "dwell_s",
+    "score",
+    "zone_id"
+   ],
+   "dwell_update": [
+    "anchor",
+    "class_id",
+    "dwell_s",
+    "score",
+    "zone_id"
+   ]
+  },
+  "line_cross": {
+   "line_cross": [
+    "anchor",
+    "class_id",
+    "direction",
+    "line_id",
+    "score"
+   ]
+  },
+  "pose_angle": {
+   "angle_in": [
+    "angle_deg",
+    "joint_id"
+   ],
+   "angle_out": [
+    "angle_deg",
+    "class_id",
+    "joint_id",
+    "max_deg",
+    "min_deg",
+    "score"
+   ]
+  },
+  "speed": {
+   "speed_normal": [
+    "speed",
+    "unit"
+   ],
+   "speed_over": [
+    "class_id",
+    "limit",
+    "score",
+    "speed",
+    "unit"
+   ],
+   "speed_under": [
+    "class_id",
+    "limit",
+    "score",
+    "speed",
+    "unit"
+   ]
+  },
+  "zone": {
+   "zone_dwell": [
+    "class_id",
+    "dwell_s",
+    "score",
+    "zone_id"
+   ],
+   "zone_enter": [
+    "class_id",
+    "score",
+    "zone_id"
+   ],
+   "zone_exit": [
+    "class_id",
+    "dwell_s",
+    "score",
+    "zone_id"
+   ]
+  }
+ },
+ "python": {
+  "apps.ConfigApp": {
+   "analyzers": "(self, spec: 'StreamSpec') -> 'list[dict]'",
+   "configure": "(self, options: 'dict', device_id: 'str') -> 'None'",
+   "event_payload": "(self, ev: 'Event') -> 'dict'",
+   "frame_payload": "(self, res: 'FrameResult', attr_names: 'tuple[str, ...]' = ()) -> 'dict'",
+   "on_event": "(self, ctx: 'StreamContext', ev: 'Event') -> 'list[Outgoing]'",
+   "on_frame": "(self, ctx: 'StreamContext', res: 'FrameResult') -> 'list[Outgoing]'",
+   "on_stream_added": "(self, ctx: 'StreamContext') -> 'None'",
+   "on_stream_removed": "(self, ctx: 'StreamContext') -> 'None'",
+   "plugins": "(self) -> 'list[str]'"
+  },
+  "embed.Runtime": {
+   "add_stream": "(self, stream_id: 'str', url: 'str', *, analyzers: 'list[dict] | None' = None, options: 'dict | None' = None, name: 'str' = '', transport: 'str' = 'tcp', score_threshold: 'float | None' = None, timeout_s: 'float' = 10.0) -> 'dict'",
+   "configure_analyzer": "(self, stream_id: 'str', name: 'str', config: 'dict', timeout_s: 'float' = 3.0) -> 'dict'",
+   "remove_stream": "(self, stream_id: 'str', timeout_s: 'float' = 5.0) -> 'None'",
+   "results": "(self, timeout_s: 'float | None' = None)",
+   "snapshot": "(self, stream_id: 'str', seq: 'int' = 0, track_id: 'int' = 0, max_side: 'int' = 640) -> 'bytes'",
+   "start": "(self)",
+   "stop": "(self) -> 'None'"
+  },
+  "geom": {
+   "joint_angle_deg": "(a, b, c, src_w: 'int', src_h: 'int') -> 'float'",
+   "point_in_polygon": "(x: 'float', y: 'float', polygon: 'list') -> 'bool'",
+   "source_boxes": "(res: 'FrameResult')",
+   "source_keypoints": "(res: 'FrameResult', det: 'Detection')"
+  },
+  "hooks.AppHooks": {
+   "analyzers": "(self, spec: 'StreamSpec') -> 'list[dict]'",
+   "on_event": "(self, ctx: 'StreamContext', ev: 'Event') -> 'list[Outgoing]'",
+   "on_frame": "(self, ctx: 'StreamContext', res: 'FrameResult') -> 'list[Outgoing]'",
+   "on_stream_added": "(self, ctx: 'StreamContext') -> 'None'",
+   "on_stream_removed": "(self, ctx: 'StreamContext') -> 'None'",
+   "plugins": "(self) -> 'list[str]'"
+  },
+  "hooks.Outgoing": "(topic_suffix: 'str', payload: 'dict | bytes', qos: 'int' = 0, retain: 'bool' = False) -> None",
+  "hooks.StreamContext": {
+   "analyzer_configs": "(self, hooks: \"'AppHooks'\") -> 'list[dict]'",
+   "configure_analyzer": "(self, name: 'str', config: 'dict', timeout_s: 'float' = 3.0) -> 'dict'",
+   "request_snapshot": "(self, seq: 'int' = 0, track_id: 'int' = 0, crop: 'bool' = True, max_side: 'int' = 640, timeout_s: 'float' = 3.0) -> 'tuple[dict, bytes]'"
+  },
+  "mqtt": {
+   "MqttClient": "(host: 'str', port: 'int' = 1883, client_id: 'str' = '', *, username: 'str' = '', password: 'str' = '', tls: 'bool' = False, ca_file: 'str' = '', cert_file: 'str' = '', key_file: 'str' = '', keepalive_s: 'int' = 30, will: 'Will | None' = None, reconnect_min_s: 'float' = 1.0, reconnect_max_s: 'float' = 60.0, max_inflight: 'int' = 32, on_connect: 'Callable[[], None] | None' = None, on_disconnect: 'Callable[[str], None] | None' = None)",
+   "Will": "(topic: 'str', payload: 'bytes', qos: 'int' = 1, retain: 'bool' = True) -> None",
+   "topic_matches": "(topic_filter: 'str', topic: 'str') -> 'bool'"
+  },
+  "mqtt.MqttClient": {
+   "close": "(self, timeout_s: 'float' = 2.0) -> 'None'",
+   "connect": "(self, timeout_s: 'float' = 10.0) -> 'bool'",
+   "publish": "(self, topic: 'str', payload: 'bytes | str', qos: 'int' = 0, retain: 'bool' = False, timeout_s: 'float' = 5.0) -> 'bool'",
+   "stats": "(self) -> 'dict'",
+   "subscribe": "(self, topic_filter: 'str', qos: 'int', callback: 'Callable[[str, bytes, bool], None]') -> 'None'",
+   "unsubscribe": "(self, topic_filter: 'str') -> 'None'"
+  }
+ },
+ "schemas": {
+  "vb-ack": {
+   "properties": [
+    "applied",
+    "command",
+    "device_id",
+    "error",
+    "ok",
+    "request_id",
+    "schema",
+    "session_id",
+    "timestamp"
+   ],
+   "required": [
+    "command",
+    "device_id",
+    "ok",
+    "request_id",
+    "schema",
+    "session_id",
+    "timestamp"
+   ]
+  },
+  "vb-command": {
+   "properties": [
+    "command",
+    "device_id",
+    "params",
+    "request_id",
+    "schema",
+    "timestamp"
+   ],
+   "required": [
+    "command",
+    "device_id",
+    "params",
+    "request_id",
+    "schema"
+   ]
+  },
+  "vb-config": {
+   "properties": [
+    "analyzers",
+    "app",
+    "backend",
+    "dev",
+    "device_id",
+    "health",
+    "mqtt",
+    "native",
+    "runtime",
+    "schema",
+    "state_dir",
+    "streams",
+    "streams_file",
+    "tracker"
+   ],
+   "required": [
+    "app",
+    "backend",
+    "device_id",
+    "mqtt",
+    "schema"
+   ]
+  },
+  "vb-event": {
+   "properties": [
+    "analyzer",
+    "device_id",
+    "fields",
+    "schema",
+    "seq",
+    "stream_id",
+    "track_id",
+    "ts_ms",
+    "type"
+   ],
+   "required": [
+    "analyzer",
+    "device_id",
+    "fields",
+    "schema",
+    "seq",
+    "stream_id",
+    "track_id",
+    "ts_ms",
+    "type"
+   ]
+  },
+  "vb-frame": {
+   "properties": [
+    "detections",
+    "device_id",
+    "inference_ms",
+    "schema",
+    "seq",
+    "stream_id",
+    "ts_ms"
+   ],
+   "required": [
+    "detections",
+    "device_id",
+    "inference_ms",
+    "schema",
+    "seq",
+    "stream_id",
+    "ts_ms"
+   ]
+  },
+  "vb-status": {
+   "properties": [
+    "device_id",
+    "online",
+    "schema",
+    "session_id",
+    "shards",
+    "streams",
+    "timestamp",
+    "uptime_s",
+    "versions"
+   ],
+   "required": [
+    "device_id",
+    "online",
+    "schema",
+    "session_id",
+    "timestamp"
+   ]
+  }
+ }
+}
