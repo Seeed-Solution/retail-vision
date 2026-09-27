@@ -4,15 +4,20 @@
 Collects everything the base declares a *stable* external surface
 (§6.14.1) into ``contracts/stable-surface.json``:
 
-- the six stable schemas' ``required`` lists and ``properties`` key sets
-  (``vb.config/1``, ``vb.event/1``, ``vb.frame/1``, ``vb.status/1``,
-  ``vb.command/1``, ``vb.ack/1``);
+- the six stable schemas (``vb.config/1``, ``vb.event/1``, ``vb.frame/1``,
+  ``vb.status/1``, ``vb.command/1``, ``vb.ack/1``) **recursively**: at every
+  level the ``required`` list, the ``properties`` key set, each property's
+  declared ``type``/``default``/bounds/``pattern``/``enum``, and the same
+  again for ``items`` (array elements) and ``oneOf`` branches;
 - each analyzer's event ``type`` strings and the union of event field
   names (from the §6.2.4 fixtures' ``expect_events``);
 - ``inspect.signature`` strings of the stable Python surface
-  (``AppHooks``, ``StreamContext``, ``Outgoing``, ``ConfigApp``,
-  ``vision_base.geom``, ``vision_base.embed.Runtime``,
-  ``vision_base.mqtt`` public API);
+  (``hooks.AppHooks``, ``hooks.StreamContext``, ``hooks.Outgoing``,
+  ``apps.ConfigApp``, ``vision_base.geom``, ``vision_base.embed.Runtime``,
+  ``vision_base.mqtt`` public API) — methods, ``classmethod``/
+  ``staticmethod``, ``property`` and public state fields alike;
+- every user-visible ``vision_base.types`` dataclass with its field names,
+  annotations and defaults;
 - the C ABI header ``vb_analyzer_abi.h`` parsed textually: the
   ``VB_ANALYZER_ABI`` value, struct declarations and free function
   declarations (no compiler involved).
@@ -20,18 +25,30 @@ Collects everything the base declares a *stable* external surface
 ``--write`` regenerates the snapshot (review the diff in the PR and add a
 line to CHANGELOG.md). ``--check`` compares the current surface against
 the committed snapshot: **removing, renaming or changing** any recorded
-item fails (exit 1); **additions** are reported but pass — within the
-same schema id / base major only additions are allowed (§6.14.1).
+item fails (exit 1); **additions** are reported but pass — within the same
+schema id / base major only additions are allowed (§6.14.1).
+
+Two asymmetries matter and are deliberate:
+
+- A **new ``required`` field** (schema root or any nested object) is not an
+  addition: it breaks every existing config/payload, so it fails. Only a new
+  *optional* property is a legal addition.
+- C ABI **member lists are order-sensitive**: reordering struct members
+  changes the binary offsets without changing the name set, so they are
+  compared positionally rather than as sets.
 
 Standard library only.
 """
 from __future__ import annotations
 
 import argparse
+import ast
+import dataclasses
 import inspect
 import json
 import re
 import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -43,17 +60,45 @@ STABLE_SCHEMAS = ["vb-config", "vb-event", "vb-frame", "vb-status",
 ABI_HEADER = "core-cpp/vb/include/vb/vb_analyzer_abi.h"
 ANALYZER_FIXTURES = "contracts/fixtures/vb/analyzers"
 
+# Schema keywords recorded verbatim for one node. Structure keywords
+# (required/properties/items/oneOf) are handled separately below.
+_SCHEMA_SCALAR_KEYS = ("$id", "type", "default", "minimum", "maximum",
+                       "exclusiveMinimum", "exclusiveMaximum", "minItems",
+                       "maxItems", "minLength", "maxLength", "pattern",
+                       "enum", "const", "additionalProperties")
+
+# List-valued keywords whose *order* carries no meaning; compared as sets.
+# ``required`` is additionally strict: an added entry is a breaking change.
+_UNORDERED_LIST_KEYS = frozenset({"required", "enum", "type"})
+
 
 # --------------------------------------------------------------- collection
+
+def _schema_node(node: Any) -> Any:
+    """Recursive stable descriptor of one JSON-schema node."""
+    if not isinstance(node, dict):
+        return node
+    out: dict[str, Any] = {}
+    for key in _SCHEMA_SCALAR_KEYS:
+        if key in node:
+            out[key] = _schema_node(node[key])
+    if "required" in node:
+        out["required"] = sorted(node["required"])
+    if "properties" in node:
+        out["properties"] = {k: _schema_node(v)
+                             for k, v in sorted(node["properties"].items())}
+    if "items" in node:
+        out["items"] = _schema_node(node["items"])
+    if "oneOf" in node:
+        out["oneOf"] = [_schema_node(branch) for branch in node["oneOf"]]
+    return out
+
 
 def collect_schemas(contracts_dir: Path = REPO / "contracts") -> dict:
     out: dict[str, Any] = {}
     for name in STABLE_SCHEMAS:
         doc = json.loads((contracts_dir / f"{name}.schema.json").read_text())
-        out[name] = {
-            "required": sorted(doc.get("required", [])),
-            "properties": sorted(doc.get("properties", {}).keys()),
-        }
+        out[name] = _schema_node(doc)
     return out
 
 
@@ -73,14 +118,65 @@ def collect_analyzers(fixtures_dir: Path = REPO / ANALYZER_FIXTURES) -> dict:
             for a, per in sorted(out.items())}
 
 
+def _init_state_fields(cls: type) -> list[str]:
+    """Public instance attributes assigned in ``__init__``.
+
+    ``ctx.state``, ``rt.frames_dropped`` and friends are set on the
+    instance, so they appear neither in the class annotations nor in
+    ``vars(cls)``; the only static source is the constructor body.
+    """
+    init = cls.__dict__.get("__init__")
+    if not inspect.isfunction(init):
+        return []
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(init)))
+    except (OSError, TypeError, SyntaxError, IndentationError, ValueError):
+        return []
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        for target in targets:
+            if (isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"):
+                names.add(target.attr)
+    return sorted(n for n in names if not n.startswith("_"))
+
+
+def _attribute_value(value: Any) -> str:
+    """Repr for immutable class attributes; a marker for anything else."""
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return repr(value)
+    return "attribute"
+
+
 def _class_surface(cls: type) -> dict:
-    """Public method signatures (+ dataclass fields via __init__)."""
+    """Public members: methods, classmethods, properties, state fields."""
     out: dict[str, str] = {}
     for name, member in sorted(vars(cls).items()):
         if name.startswith("_"):
             continue
-        if inspect.isfunction(member):
+        if isinstance(member, classmethod):
+            out[name] = f"classmethod{inspect.signature(getattr(cls, name))}"
+        elif isinstance(member, staticmethod):
+            out[name] = f"staticmethod{inspect.signature(getattr(cls, name))}"
+        elif isinstance(member, property):
+            out[name] = "property"
+        elif inspect.isfunction(member):
             out[name] = str(inspect.signature(member))
+        elif not inspect.isroutine(member) and not inspect.isdatadescriptor(member):
+            # Plain public class attribute (e.g. ConfigApp.name).
+            out[name] = f"attribute = {_attribute_value(member)}"
+    for name, annotation in sorted(getattr(cls, "__annotations__", {}).items()):
+        if not name.startswith("_"):
+            out.setdefault(name, f"attribute: {annotation}")
+    for name in _init_state_fields(cls):
+        out.setdefault(name, "attribute")
     return out
 
 
@@ -102,10 +198,43 @@ def _module_surface(module: Any) -> dict:
     return out
 
 
+def _field_default(field: dataclasses.Field) -> str:
+    if field.default is not dataclasses.MISSING:
+        return repr(field.default)
+    if field.default_factory is not dataclasses.MISSING:  # type: ignore[misc]
+        factory = getattr(field.default_factory, "__name__", None) \
+            or repr(field.default_factory)
+        return f"factory:{factory}"
+    return "required"
+
+
+def _dataclass_surface(cls: type) -> dict:
+    """Field name -> {type, default} for a user-visible dataclass."""
+    out: dict[str, dict[str, str]] = {}
+    for field in dataclasses.fields(cls):
+        if field.name.startswith("_"):
+            continue
+        out[field.name] = {"type": str(field.type),
+                           "default": _field_default(field)}
+    return out
+
+
+def _types_surface(types_module: Any) -> dict:
+    out: dict[str, dict] = {}
+    for name, member in sorted(vars(types_module).items()):
+        if name.startswith("_") or not inspect.isclass(member):
+            continue
+        if member.__module__ != types_module.__name__:
+            continue
+        if dataclasses.is_dataclass(member):
+            out[name] = _dataclass_surface(member)
+    return out
+
+
 def collect_python(vision_base: Any | None = None) -> dict:
     if vision_base is None:
         import vision_base  # noqa: PLC0415
-    from vision_base import apps, embed, geom, hooks, mqtt  # noqa: PLC0415
+    from vision_base import apps, embed, geom, hooks, mqtt, types  # noqa: PLC0415
     return {
         "hooks.AppHooks": _class_surface(hooks.AppHooks),
         "hooks.StreamContext": _class_surface(hooks.StreamContext),
@@ -115,6 +244,7 @@ def collect_python(vision_base: Any | None = None) -> dict:
         "embed.Runtime": _class_surface(embed.Runtime),
         "mqtt": _module_surface(mqtt),
         "mqtt.MqttClient": _class_surface(mqtt.MqttClient),
+        "types": _types_surface(types),
     }
 
 
@@ -163,23 +293,53 @@ def build_snapshot(repo_root: Path = REPO) -> dict:
 
 # ---------------------------------------------------------------- comparing
 
+def _join(path: str, key: str) -> str:
+    return f"{path}.{key}" if path else key
+
+
+def _compare_lists(path: str, recorded: list, current: list,
+                   errors: list[str], additions: list[str]) -> None:
+    key = path.rsplit(".", 1)[-1]
+    if key in _UNORDERED_LIST_KEYS:
+        try:
+            rs, cs = set(recorded), set(current)
+        except TypeError:  # unhashable (dict) items: fall through to ordered
+            rs = cs = None
+        if rs is not None:
+            for item in sorted(rs - cs, key=repr):
+                errors.append(f"removed {path} item {item!r}")
+            for item in sorted(cs - rs, key=repr):
+                if key == "required":
+                    # A new required field breaks every existing config /
+                    # payload, so it is not a legal addition (§6.14.1).
+                    errors.append(f"added required field {path} item "
+                                  f"{item!r} (must be optional)")
+                else:
+                    additions.append(f"added {path} item {item!r}")
+            return
+    # Order-sensitive (C ABI member lists: order fixes the binary offsets).
+    for i, item in enumerate(recorded):
+        if i >= len(current):
+            errors.append(f"removed {path}[{i}] item {item!r}")
+        else:
+            _compare(f"{path}[{i}]", item, current[i], errors, additions)
+    for i in range(len(recorded), len(current)):
+        additions.append(f"added {path}[{i}] item {current[i]!r}")
+
+
 def _compare(path: str, recorded: Any, current: Any,
              errors: list[str], additions: list[str]) -> None:
     if isinstance(recorded, dict) and isinstance(current, dict):
         for key in sorted(recorded):
             if key not in current:
-                errors.append(f"removed {path}.{key}")
+                errors.append(f"removed {_join(path, key)}")
             else:
-                _compare(f"{path}.{key}", recorded[key], current[key],
+                _compare(_join(path, key), recorded[key], current[key],
                          errors, additions)
         for key in sorted(set(current) - set(recorded)):
-            additions.append(f"added {path}.{key}")
+            additions.append(f"added {_join(path, key)}")
     elif isinstance(recorded, list) and isinstance(current, list):
-        rs, cs = set(recorded), set(current)
-        for item in sorted(rs - cs):
-            errors.append(f"removed {path} item {item!r}")
-        for item in sorted(cs - rs):
-            additions.append(f"added {path} item {item!r}")
+        _compare_lists(path, recorded, current, errors, additions)
     elif recorded != current:
         errors.append(f"changed {path}: {recorded!r} -> {current!r}")
 

@@ -14,6 +14,11 @@
       "properties": {
         "name": { "type": "string", "minLength": 1 },
         "model_path": { "type": "string", "minLength": 1 },
+        "model_sha256": {
+          "type": "string", "default": "",
+          "pattern": "^([0-9a-fA-F]{64})?$",
+          "description": "Optional 64-hex-digit sha256 of the model file (case-insensitive). Empty = not checked. A mismatch refuses to load."
+        },
         "input_size": {
           "type": "array", "items": { "type": "integer", "minimum": 1 },
           "minItems": 2, "maxItems": 2, "default": [640, 640]
@@ -110,7 +115,7 @@
     "health": {
       "type": "object",
       "properties": {
-        "host": { "type": "string", "default": "0.0.0.0" },
+        "host": { "type": "string", "default": "127.0.0.1" },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 8099 }
       }
     },

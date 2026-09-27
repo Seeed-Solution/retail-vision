@@ -100,7 +100,9 @@ endif()
 if(VB_WITH_JPEG)
     find_path(TURBOJPEG_INCLUDE_DIR turbojpeg.h REQUIRED)
     find_library(TURBOJPEG_LIB turbojpeg REQUIRED)
-    target_compile_definitions(vb_core PRIVATE VB_HAVE_JPEG=1)
+    # PUBLIC, not PRIVATE: "this build can encode snapshots" is a property of
+    # the library that consumers must be able to branch on (test_control does).
+    target_compile_definitions(vb_core PUBLIC VB_HAVE_JPEG=1)
     target_include_directories(vb_core PRIVATE ${TURBOJPEG_INCLUDE_DIR})
     # Private link so the definition above reaches snapshot.cpp.
     target_sources(vb_core PRIVATE src/snapshot.cpp)
@@ -121,14 +123,54 @@ if(VB_WITH_TLS AND OpenSSL_FOUND)
 endif()
 
 # ---- vb_algo install/export (spec BASE-1 §6.13.2, M1.24) ----
+#
+# Only the algorithm-facing headers are installed. `runtime.h` stays internal:
+# it includes src/dev_tensor.h, which is not installed, so shipping it would
+# publish a header that cannot be included on its own (§5.5.3 c — embedding in
+# C++ means vb_algo, not the runtime).
+set(VB_INSTALL_HEADERS
+    include/vb/analyzer.h
+    include/vb/backend.h          # pulled in by decoder.h
+    include/vb/decoder.h
+    include/vb/geom2d.h
+    include/vb/json.h
+    include/vb/letterbox.h
+    include/vb/post.h
+    include/vb/tracker.h
+    include/vb/types.h
+    include/vb/vb_analyzer_abi.h
+    include/vb/wire.h
+)
 include(CMakePackageConfigHelpers)
+
+# The package version is read from the same place `vb-runtime --version` and
+# hello.runtime_version come from (include/vb/runtime.h), so an embedder can
+# pin a version that matches the binary it talks to instead of a number typed
+# into this file.
+file(STRINGS include/vb/runtime.h _vb_runtime_version_line
+     REGEX "constexpr const char\\* runtime_version")
+if(NOT _vb_runtime_version_line MATCHES "\"([0-9]+\\.[0-9]+\\.[0-9]+)\"")
+    message(FATAL_ERROR "vb: cannot read the version from include/vb/runtime.h")
+endif()
+set(VB_VERSION "${CMAKE_MATCH_1}")
+
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/vbConfigVersion.cmake
+    VERSION ${VB_VERSION}
+    # Same major.minor, as between vb-runtime and vision_base (§6.14.1);
+    # patch may differ.
+    COMPATIBILITY SameMinorVersion)
+
 install(TARGETS vb_algo EXPORT vbTargets ARCHIVE DESTINATION lib)
-install(DIRECTORY include/vb DESTINATION include)
+install(FILES ${VB_INSTALL_HEADERS} DESTINATION include/vb)
 install(FILES third_party/nlohmann/json.hpp DESTINATION include/vb/third_party/nlohmann)
 install(EXPORT vbTargets NAMESPACE vb:: DESTINATION lib/cmake/vb)
 configure_package_config_file(cmake/vbConfig.cmake.in
     ${CMAKE_CURRENT_BINARY_DIR}/vbConfig.cmake INSTALL_DESTINATION lib/cmake/vb)
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/vbConfig.cmake DESTINATION lib/cmake/vb)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/vbConfig.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/vbConfigVersion.cmake
+    DESTINATION lib/cmake/vb)
+message(STATUS "vb: vb_algo package version ${VB_VERSION}")
 
 
 # Tests must be enabled before the backend subdirectories add theirs.
