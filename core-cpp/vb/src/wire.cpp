@@ -41,9 +41,45 @@ void put_header(std::vector<uint8_t>& out, const char magic[4], uint32_t body_le
     put_u32(out, body_len);
 }
 
+// B9: the header declares n_det (u16), kpt_per_det (u8) and attr_per_det (u8)
+// while the payload is written from the vectors. Any disagreement between the
+// two makes body_len describe fewer bytes than are emitted, and the leftovers
+// are read as the next IPC record's magic.
+bool vbr1_validate(const WireFrameRec& r, std::string& err) {
+    if (r.dets.size() > 0xFFFFu) {
+        err = "VBR1 too many detections: " + std::to_string(r.dets.size());
+        return false;
+    }
+    const size_t n_det = r.dets.size();
+    const size_t kpts = n_det * size_t(r.kpt_per_det) * 3;
+    if (r.kpts.size() != kpts) {
+        err = "VBR1 keypoint count " + std::to_string(r.kpts.size()) +
+              " does not match n_det " + std::to_string(n_det) +
+              " * kpt_per_det " + std::to_string(r.kpt_per_det) + " * 3 (" +
+              std::to_string(kpts) + ")";
+        return false;
+    }
+    const size_t attrs = n_det * size_t(r.attr_per_det);
+    if (r.attrs.size() != attrs) {
+        err = "VBR1 attribute count " + std::to_string(r.attrs.size()) +
+              " does not match n_det " + std::to_string(n_det) +
+              " * attr_per_det " + std::to_string(r.attr_per_det) + " (" +
+              std::to_string(attrs) + ")";
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
-void wire_encode_vbr1(const WireFrameRec& r, std::vector<uint8_t>& out) {
+bool wire_encode_vbr1(const WireFrameRec& r, std::vector<uint8_t>& out,
+                      std::string* err) {
+    std::string why;
+    if (!vbr1_validate(r, why)) {
+        if (err) *err = why;
+        return false;
+    }
+    if (err) err->clear();
     const uint16_t n_det = static_cast<uint16_t>(r.dets.size());
     const size_t body_len =
         64 + size_t(n_det) * 28 +
@@ -80,6 +116,7 @@ void wire_encode_vbr1(const WireFrameRec& r, std::vector<uint8_t>& out) {
     }
     for (float v : r.kpts) put_f32(out, v);
     for (float v : r.attrs) put_f32(out, v);
+    return true;
 }
 
 void wire_encode_json_record(const char magic[4], const std::string& json_body,

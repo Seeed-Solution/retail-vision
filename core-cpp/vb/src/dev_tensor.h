@@ -43,8 +43,10 @@ struct DevTensorFrame {
 };
 
 // Appends the full VBT1 record (8-byte header + body) to out. Returns false
-// with err set when the record would exceed kDevTensorMaxRecord (caller drops
-// it and counts dev_tensor_oversize).
+// with err set and leaves out untouched when the frame cannot be encoded
+// faithfully: more than 65535 tensors, a tensor with more than 4 dims, a name
+// longer than 65535 bytes, data larger than u32, or a record above
+// kDevTensorMaxRecord (the caller drops it and counts dev_tensor_oversize).
 bool wire_encode_vbt1(const DevTensorFrame& f, std::vector<uint8_t>& out,
                       std::string& err);
 

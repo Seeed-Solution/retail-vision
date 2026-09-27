@@ -100,6 +100,60 @@ int main(int argc, char** argv) {
         CHECK(enc[70] == 0 && enc[71] == 0);  // reserved
     }
 
+    // B9: a record whose declared counts disagree with its payload must fail
+    // the encode. Emitting it would make body_len describe fewer bytes than
+    // the payload writes, and the leftovers would be read as the next record's
+    // magic (measured: a body declared 1112 bytes and wrote 1116).
+    {
+        vb::WireFrameRec r;
+        r.dets.resize(0x10000);  // beyond the u16 n_det field
+        std::vector<uint8_t> enc;
+        std::string err;
+        CHECK(!vb::wire_encode_vbr1(r, enc, &err));
+        CHECK(!err.empty());
+        CHECK(enc.empty());
+    }
+    {
+        // One detection, kpt_per_det = 17, but a single keypoint in the vector.
+        vb::WireFrameRec r;
+        r.dets.push_back(vb::WireDet{0.5f, 0.5f, 0.2f, 0.2f, 0.9f, 1, 7});
+        r.kpt_per_det = 17;
+        r.kpts = {0.1f, 0.2f, 0.9f};
+        std::vector<uint8_t> enc;
+        std::string err;
+        CHECK(!vb::wire_encode_vbr1(r, enc, &err));
+        CHECK(enc.empty());
+    }
+    {
+        // The reported shape: attr_per_det says 2, the payload carries 1.
+        vb::WireFrameRec r;
+        r.dets.push_back(vb::WireDet{0.5f, 0.5f, 0.2f, 0.2f, 0.9f, 1, 7});
+        r.attr_per_det = 2;
+        r.attrs = {0.25f};
+        std::vector<uint8_t> enc;
+        std::string err;
+        CHECK(!vb::wire_encode_vbr1(r, enc, &err));
+        CHECK(enc.empty());
+    }
+    {
+        // Matching counts still encode, through both call forms (the two
+        // argument form stays source-compatible with existing callers).
+        vb::WireFrameRec r;
+        r.dets.push_back(vb::WireDet{0.5f, 0.5f, 0.2f, 0.2f, 0.9f, 1, 7});
+        r.kpt_per_det = 1;
+        r.kpts = {0.1f, 0.2f, 0.9f};
+        r.attr_per_det = 1;
+        r.attrs = {0.5f};
+        std::vector<uint8_t> enc;
+        vb::wire_encode_vbr1(r, enc);  // 2-arg form: return value ignored
+        CHECK(enc.size() == 8 + 64 + 28 + 12 + 4);
+        std::vector<uint8_t> enc2;
+        std::string err;
+        CHECK(vb::wire_encode_vbr1(r, enc2, &err));
+        CHECK(err.empty());
+        CHECK(enc2 == enc);
+    }
+
     std::printf("wire: all checks passed\n");
     return 0;
 }

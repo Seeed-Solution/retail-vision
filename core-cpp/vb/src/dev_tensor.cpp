@@ -52,6 +52,29 @@ void put_f64(std::vector<uint8_t>& out, double v) {
 
 bool wire_encode_vbt1(const DevTensorFrame& f, std::vector<uint8_t>& out,
                       std::string& err) {
+    err.clear();
+    // The header carries n_tensors as u16, n_dims per tensor as u8 (≤ 4 by
+    // contract), name_len as u16 and data_len as u32. Refuse anything that
+    // would be narrowed: a truncated length field leaves the reader parsing
+    // the payload as the next field.
+    if (f.tensors.size() > 0xFFFFu) {
+        err = "VBT1 too many tensors: " + std::to_string(f.tensors.size());
+        return false;
+    }
+    for (const auto& t : f.tensors) {
+        if (t.dims.size() > 4) {
+            err = "VBT1 tensor has more than 4 dims: " + std::to_string(t.dims.size());
+            return false;
+        }
+        if (t.name.size() > 0xFFFFu) {
+            err = "VBT1 tensor name too long: " + std::to_string(t.name.size());
+            return false;
+        }
+        if (t.data.size() > 0xFFFFFFFFull) {
+            err = "VBT1 tensor data too large: " + std::to_string(t.data.size());
+            return false;
+        }
+    }
     std::vector<uint8_t> body;
     put_u32(body, f.stream_index);
     put_u64(body, f.seq);

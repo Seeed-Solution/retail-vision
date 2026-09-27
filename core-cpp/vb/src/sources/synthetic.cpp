@@ -5,6 +5,7 @@
 //     close()/open() (so a forced failure at fail_at_seq happens once);
 //   - fail_at_seq: read() returns -1 once when seq reaches that value
 //     (used by test_pool to exercise the reconnect path).
+#include <climits>
 #include <mutex>
 #include <chrono>
 #include <cmath>
@@ -58,6 +59,16 @@ long query_int(const std::map<std::string, std::string>& q, const char* key, lon
     return (end && *end == '\0') ? v : dflt;
 }
 
+// Narrow a parsed value into int without wrapping: a url carrying a value
+// beyond int range must end up out of bounds (and be refused), not folded into
+// a small positive size.
+int query_int32(const std::map<std::string, std::string>& q, const char* key, int dflt) {
+    const long v = query_int(q, key, dflt);
+    if (v > INT_MAX) return INT_MAX;
+    if (v < INT_MIN) return INT_MIN;
+    return static_cast<int>(v);
+}
+
 struct SyntheticParams {
     int w = 1280, h = 720, fps = 15, boxes = 3;
     uint64_t fail_at_seq = 0;  // 0 = never fail
@@ -65,10 +76,10 @@ struct SyntheticParams {
     static SyntheticParams from_url(const std::string& url) {
         auto q = parse_query(url);
         SyntheticParams p;
-        p.w = static_cast<int>(query_int(q, "w", p.w));
-        p.h = static_cast<int>(query_int(q, "h", p.h));
-        p.fps = static_cast<int>(query_int(q, "fps", p.fps));
-        p.boxes = static_cast<int>(query_int(q, "boxes", p.boxes));
+        p.w = query_int32(q, "w", p.w);
+        p.h = query_int32(q, "h", p.h);
+        p.fps = query_int32(q, "fps", p.fps);
+        p.boxes = query_int32(q, "boxes", p.boxes);
         p.fail_at_seq = static_cast<uint64_t>(query_int(q, "fail_at_seq", 0));
         if (p.w <= 0) p.w = 1280;
         if (p.h <= 0) p.h = 720;
@@ -109,8 +120,15 @@ public:
             seq = seq_++;
             if (p_.fail_at_seq != 0 && seq == p_.fail_at_seq) return -1;
         }
-        auto pixels = std::make_shared<std::vector<uint8_t>>(
-            static_cast<size_t>(p_.w) * static_cast<size_t>(p_.h) * 3);
+        // Re-checked here as well as at add time: the allocation below must
+        // never be sized by an overflowing product.
+        const size_t row_bytes = static_cast<size_t>(p_.w) * 3;
+        const size_t rows = static_cast<size_t>(p_.h);
+        if (row_bytes == 0 || rows == 0 ||
+            rows > kSyntheticMaxFrameBytes / row_bytes)
+            return -1;
+        const size_t bytes = row_bytes * rows;
+        auto pixels = std::make_shared<std::vector<uint8_t>>(bytes);
         for (size_t i = 0; i < pixels->size(); ++i)
             (*pixels)[i] = static_cast<uint8_t>((seq * 31 + i) & 0xff);
         out.stream_index = 0;
@@ -255,7 +273,9 @@ public:
             err = "synthetic backend cannot open url: " + s.url;
             return nullptr;
         }
-        return std::make_unique<SyntheticSource>(SyntheticParams::from_url(s.url));
+        SyntheticParams p = SyntheticParams::from_url(s.url);
+        if (!synthetic_dims_ok(p.w, p.h, err)) return nullptr;
+        return std::make_unique<SyntheticSource>(p);
     }
     std::unique_ptr<InferenceContext> create_context(int index,
                                                      std::string& err) override {
@@ -272,6 +292,22 @@ private:
 };
 
 }  // namespace
+
+bool synthetic_dims_ok(int w, int h, std::string& err) {
+    if (w <= 0 || h <= 0 || w > kSyntheticMaxDim || h > kSyntheticMaxDim) {
+        err = "synthetic source size out of range (1.." +
+              std::to_string(kSyntheticMaxDim) + "): " + std::to_string(w) + "x" +
+              std::to_string(h);
+        return false;
+    }
+    const std::size_t row_bytes = static_cast<std::size_t>(w) * 3;
+    if (static_cast<std::size_t>(h) > kSyntheticMaxFrameBytes / row_bytes) {
+        err = "synthetic frame too large: " + std::to_string(w) + "x" +
+              std::to_string(h);
+        return false;
+    }
+    return true;
+}
 
 std::unique_ptr<Backend> make_synthetic_backend(const std::string& backend_json,
                                                 std::string& err) {

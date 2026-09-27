@@ -8,6 +8,7 @@
 // by core-py/vision_base/tests/gen_const_onnx.py — detections must equal the
 // same fixture.
 // Part C (VB_WITH_GST): the GStreamer source on a videotestsrc pipeline.
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -17,8 +18,12 @@
 #include <string>
 #include <vector>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include "check.h"
 #include "cpu_backend.h"
+#include "dev_tensor.h"
 #include "vb/backend.h"
 #include "vb/json.h"
 #include "vb/post.h"
@@ -28,6 +33,29 @@
 #endif
 
 namespace {
+
+double mono_s() {
+    using namespace std::chrono;
+    return duration_cast<duration<double>>(steady_clock::now().time_since_epoch())
+        .count();
+}
+
+#if defined(VB_WITH_GST)
+// Writes a tiny Matroska clip with the GStreamer command line tool so the uri
+// code path can be exercised end to end (the test target has no GStreamer
+// headers of its own). False when the tool is unavailable or failed.
+bool make_test_clip(const std::string& path) {
+    ::unlink(path.c_str());
+    const std::string cmd =
+        "gst-launch-1.0 -q videotestsrc num-buffers=30 ! "
+        "video/x-raw,format=I420,width=64,height=48 ! matroskamux ! filesink "
+        "location=" +
+        path + " >/dev/null 2>&1";
+    if (std::system(cmd.c_str()) != 0) return false;
+    std::ifstream f(path, std::ios::binary);
+    return f.good();
+}
+#endif
 
 std::vector<uint8_t> read_file_bytes(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
@@ -171,10 +199,77 @@ int main(int argc, char** argv) {
         auto r = vb::create_backend("cpu", vb::json_dump(bj), err);
         if (!r) std::fprintf(stderr, "registry: %s\n", err.c_str());
         CHECK(r != nullptr);
+
+        // Resource bound: a model file larger than kCpuMaxModelBytes is
+        // refused before it is read (sparse file, so this stays cheap).
+        char big_path[] = "/tmp/vb_big_model_XXXXXX";
+        int bfd = ::mkstemp(big_path);
+        CHECK(bfd >= 0);
+        CHECK(::ftruncate(bfd, static_cast<off_t>(vb::kCpuMaxModelBytes + 1)) == 0);
+        ::close(bfd);
+        vb::Json bigj;
+        bigj["model_path"] = std::string(big_path);
+        err.clear();
+        CHECK(vb::make_cpu_backend(vb::json_dump(bigj), err) == nullptr);
+        CHECK(err.find("too large") != std::string::npos);
+        ::unlink(big_path);
+
+        // §6.12 raw passthrough over a real ORT tensor: exactly one tensor,
+        // copied at its true element width. The decoder path used to prepend
+        // output_name_ to the complete output list, so output 0 was fetched
+        // (and copied) twice.
+        {
+            vb::Json rj = bj;
+            rj["decoder"] = vb::json_parse(R"({"type":"raw"})");
+            err.clear();
+            auto rawb = vb::make_cpu_backend(vb::json_dump(rj), err);
+            if (!rawb) {
+                std::fprintf(stderr, "raw backend: %s\n", err.c_str());
+                return 1;
+            }
+            auto rctx = rawb->create_context(0, err);
+            CHECK(rctx != nullptr);
+            vb::DetectionResult rres;
+            const vb::FrameBuf* one[1] = {&frame};
+            CHECK(rctx->infer(one, 1, 0.25f, 0.5f, &rres, err) == 0);
+            CHECK(rres.dets.empty());  // raw: no detections, §6.12
+            auto* rsrc = dynamic_cast<vb::RawTensorSource*>(rctx.get());
+            CHECK(rsrc != nullptr);
+            std::vector<vb::DevTensor> ts;
+            CHECK(rsrc->last_raw_tensors(ts));
+            CHECK(ts.size() == 1);  // not the duplicated first output
+            CHECK(ts[0].dtype == 0);  // VBT1 f32
+            // [1, A, 5 + C] with the batch dimension dropped.
+            CHECK(ts[0].dims.size() == 2);
+            CHECK(ts[0].dims[0] == fx.at("n_anchors").get<int>());
+            CHECK(ts[0].dims[1] == fx.at("n_cls").get<int>() + 5);
+            const size_t expect_elems = static_cast<size_t>(fx.at("n_anchors").get<int>()) *
+                                        (fx.at("n_cls").get<int>() + 5);
+            CHECK(ts[0].data.size() == expect_elems * sizeof(float));
+            std::printf("B: raw passthrough carries %zu tensor(s), %zu bytes\n",
+                        ts.size(), ts[0].data.size());
+        }
+
+        // Digest: a configured model_sha256 must match the bytes ORT loads.
+        vb::Json sj = bj;
+        sj["model_sha256"] = std::string(64, '0');
+        err.clear();
+        CHECK(vb::make_cpu_backend(vb::json_dump(sj), err) == nullptr);
+        CHECK(err.find("sha256 mismatch") != std::string::npos);
+        sj["model_sha256"] = backend->model_sha256();
+        err.clear();
+        auto hashed = vb::make_cpu_backend(vb::json_dump(sj), err);
+        if (!hashed) std::fprintf(stderr, "sha256 accept: %s\n", err.c_str());
+        CHECK(hashed != nullptr);
+        vb::Json bad = bj;
+        bad["model_sha256"] = "not-a-digest";
+        err.clear();
+        CHECK(vb::make_cpu_backend(vb::json_dump(bad), err) == nullptr);
+        std::printf("B: oversized model and wrong/malformed sha256 refused\n");
     }
 
 #if defined(VB_WITH_GST)
-    // ---- Part C: GStreamer source on a bounded videotestsrc pipeline ----
+    // ---- Part C1: dev pipeline (launch string) on a bounded videotestsrc ----
     {
         std::string err;
         vb::StreamSpec spec;
@@ -186,11 +281,12 @@ int main(int argc, char** argv) {
             return 1;
         }
         CHECK(src->open(err));
-        int frames = 0, eos = 0;
+        int frames = 0, eos = 0, idle = 0;
         vb::FrameBuf f;
         uint64_t expect_seq = 0;
         for (int i = 0; i < 60; ++i) {
             int rc = src->read(f, 2000);
+            if (rc == 0) ++idle;
             if (rc == 1) {
                 CHECK(f.w == 64 && f.h == 48 && f.stride == 64 * 3);
                 CHECK(f.fmt == vb::PixFmt::RGB888 && f.mem == vb::Mem::Host);
@@ -206,9 +302,89 @@ int main(int argc, char** argv) {
         }
         CHECK(frames >= 3);
         CHECK(eos == 1);
+        // Regression: try_pull_sample returns NULL *immediately* once the
+        // appsink is EOS, so a read() that only consulted the bus could answer
+        // "no frame yet" in a tight loop while the EOS message was still in
+        // flight. EOS must be reported as soon as the sink says so, not after
+        // the caller burns its budget: at most a couple of idle polls.
+        CHECK(idle <= 3);
         src->close();
         CHECK(std::string(src->decode_path()) == "sw");
-        std::printf("C: gst source delivered %d frames + EOS\n", frames);
+        std::printf("C1: gst source delivered %d frames + EOS\n", frames);
+    }
+
+    // ---- Part C2: C1 — a launch string is a dev-mode affordance ----
+    {
+        std::string err;
+        vb::StreamSpec spec;
+        spec.url = "videotestsrc num-buffers=5";
+        ::setenv("VB_PRODUCTION", "1", 1);
+        CHECK(vb::make_gst_source(spec, err) == nullptr);
+        CHECK(!err.empty());
+        ::unsetenv("VB_PRODUCTION");
+        auto dev_ok = vb::make_gst_source(spec, err);
+        CHECK(dev_ok != nullptr);
+
+        // Unknown schemes are refused in every mode.
+        vb::StreamSpec evil;
+        evil.url = "evil://cam/s";
+        err.clear();
+        CHECK(vb::make_gst_source(evil, err) == nullptr);
+        CHECK(!err.empty());
+        // The url is applied as a property: a uri that cannot decode must fail
+        // open() itself, not report success and fail later through reconnect.
+        vb::StreamSpec missing;
+        missing.url = "file:///nonexistent/vb_no_such_clip.mkv";
+        err.clear();
+        auto dead = vb::make_gst_source(missing, err);
+        CHECK(dead != nullptr);
+        if (dead) {
+            const double t0 = mono_s();
+            const bool opened = dead->open(err);
+            const double dt = mono_s() - t0;
+            if (opened) {
+                std::fprintf(stderr, "undecodable uri reported open\n");
+                return 1;
+            }
+            CHECK(!err.empty());
+            CHECK(dt < vb::kGstOpenTimeoutS + 2.0);  // bounded, not a hang
+            dead->close();
+        }
+        std::printf("C2: production refuses launch strings; open() fails on a dead uri\n");
+    }
+
+    // ---- Part C3: uri path end to end (uridecodebin + property url) ----
+    {
+        const std::string clip = "/tmp/vb_gst_source_test.mkv";
+        if (!make_test_clip(clip)) {
+            std::printf("C3: SKIP (gst-launch-1.0 unavailable, no clip to read)\n");
+        } else {
+            std::string err;
+            vb::StreamSpec spec;
+            spec.url = "file://" + clip;
+            auto src = vb::make_gst_source(spec, err);
+            CHECK(src != nullptr);
+            if (!src) {
+                std::fprintf(stderr, "uri source: %s\n", err.c_str());
+                return 1;
+            }
+            CHECK(src->open(err));
+            int frames = 0;
+            vb::FrameBuf f;
+            for (int i = 0; i < 200 && frames < 30; ++i) {
+                int rc = src->read(f, 2000);
+                if (rc == 1) {
+                    CHECK(f.w == 64 && f.h == 48 && f.fmt == vb::PixFmt::RGB888);
+                    ++frames;
+                } else if (rc == -1) {
+                    break;
+                }
+            }
+            CHECK(frames >= 1);
+            src->close();
+            ::unlink(clip.c_str());
+            std::printf("C3: uri source delivered %d frames\n", frames);
+        }
     }
 #endif
 

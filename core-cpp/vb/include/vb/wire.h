@@ -33,8 +33,15 @@ struct WireFrameRec {
     std::vector<float> attrs;  // n_det * attr_per_det
 };
 
-// VBR1: append the full record (header + body) to out.
-void wire_encode_vbr1(const WireFrameRec& r, std::vector<uint8_t>& out);
+// VBR1: append the full record (header + body) to out. Returns false and
+// appends nothing when the record cannot be encoded faithfully — more than
+// 65535 detections, or a keypoint/attribute vector whose length disagrees with
+// n_det * kpt_per_det * 3 / n_det * attr_per_det. The counts in the header are
+// never narrowed, because a truncated n_det would leave the reader parsing
+// payload bytes as the next IPC record. err, when given, receives the reason;
+// callers that must not drop a frame silently should pass it.
+bool wire_encode_vbr1(const WireFrameRec& r, std::vector<uint8_t>& out,
+                      std::string* err = nullptr);
 
 // VBE1 / VBC1: append header (given 4-char magic, e.g. "VBE1"/"VBC1") + UTF-8
 // JSON body.

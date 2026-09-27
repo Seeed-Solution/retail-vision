@@ -63,6 +63,57 @@ OrtEnv* ort_env(std::string& err) {
     return env;
 }
 
+// Reads the whole model into memory once, refusing anything larger than
+// kCpuMaxModelBytes. The same buffer is hashed and handed to ORT, so a file
+// swapped between the two steps cannot be verified against the loaded bytes.
+bool read_model_file(const std::string& path, std::vector<uint8_t>& bytes,
+                     std::string& err) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) {
+        err = "cannot open model: " + path;
+        return false;
+    }
+    const long end = std::fseek(f, 0, SEEK_END) == 0 ? std::ftell(f) : -1;
+    if (end >= 0 && static_cast<unsigned long long>(end) > kCpuMaxModelBytes) {
+        std::fclose(f);
+        err = "model file too large: " + path + " (" + std::to_string(end) +
+              " bytes > " + std::to_string(kCpuMaxModelBytes) + ")";
+        return false;
+    }
+    if (end >= 0) std::fseek(f, 0, SEEK_SET);
+    char buf[65536];
+    size_t r;
+    while ((r = std::fread(buf, 1, sizeof buf, f)) > 0) {
+        if (bytes.size() + r > kCpuMaxModelBytes) {
+            std::fclose(f);
+            bytes.clear();
+            err = "model file too large: " + path;
+            return false;
+        }
+        bytes.insert(bytes.end(), buf, buf + r);
+    }
+    std::fclose(f);
+    if (bytes.empty()) {
+        err = "empty model file: " + path;
+        return false;
+    }
+    return true;
+}
+
+bool is_sha256_hex(const std::string& s) {
+    if (s.size() != 64) return false;
+    for (char c : s)
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return false;
+    return true;
+}
+
+std::string lower_ascii(std::string s) {
+    for (char& c : s)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return s;
+}
+
 // ---- Letterbox + RGB(A/BGR) -> NCHW float preprocessing (plain loops) ----
 void preprocess(const FrameBuf& f, const LetterboxGeom& g, bool bgr,
                 std::vector<float>& nchw) {
@@ -156,22 +207,23 @@ public:
         }
         model_path_ = j.at("model_path").get<std::string>();
         int threads = j.value("intra_threads", 2);
+        const std::string want_sha = j.value("model_sha256", std::string());
+        if (!want_sha.empty() && !is_sha256_hex(want_sha)) {
+            err = "backend.model_sha256 must be 64 hex characters";
+            return;
+        }
 
-        FILE* f = std::fopen(model_path_.c_str(), "rb");
-        if (!f) {
-            err = "cannot open model: " + model_path_;
-            return;
-        }
         std::vector<uint8_t> bytes;
-        char buf[65536];
-        size_t r;
-        while ((r = std::fread(buf, 1, sizeof buf, f)) > 0) bytes.insert(bytes.end(), buf, buf + r);
-        std::fclose(f);
-        if (bytes.empty()) {
-            err = "empty model file: " + model_path_;
+        if (!read_model_file(model_path_, bytes, err)) return;
+        sha256_ = sha256_hex(bytes);
+        if (!want_sha.empty() && lower_ascii(want_sha) != sha256_) {
+            err = "model sha256 mismatch: expected " + lower_ascii(want_sha) +
+                  ", got " + sha256_;
             return;
         }
-        sha256_ = sha256_hex(bytes);
+        // Keep the verified bytes alive for the session's lifetime: ORT loads
+        // from this exact buffer instead of re-reading the path.
+        model_bytes_ = std::move(bytes);
 
         OrtSessionOptions* so = nullptr;
         if (!ort_check(ort()->CreateSessionOptions(&so), "CreateSessionOptions", err)) return;
@@ -190,8 +242,10 @@ public:
             ort()->ReleaseSessionOptions(so);
             return;
         }
-        bool loaded = ort_check(ort()->CreateSession(env, model_path_.c_str(), so, &session_),
-                                "load model", err);
+        bool loaded = ort_check(
+            ort()->CreateSessionFromArray(env, model_bytes_.data(), model_bytes_.size(),
+                                          so, &session_),
+            "load model", err);
         ort()->ReleaseSessionOptions(so);
         if (!loaded) {
             session_ = nullptr;
@@ -261,12 +315,27 @@ public:
             err = "cpu backend expects an NCHW RGB input";
             return;
         }
-        model_h_ = static_cast<int>(dims[2]);
-        model_w_ = static_cast<int>(dims[3]);
-        if (model_h_ <= 0 || model_w_ <= 0) {
+        // Validate in int64 before narrowing: H/W drive the preprocess float
+        // buffer (3 * H * W * 4 bytes), so they are bounded, not just positive.
+        const int64_t mh = dims[2], mw = dims[3];
+        if (mh <= 0 || mw <= 0) {
             err = "model input must have static H/W";
             return;
         }
+        if (mh > kCpuMaxModelDim || mw > kCpuMaxModelDim) {
+            err = "model input too large: " + std::to_string(mw) + "x" +
+                  std::to_string(mh) + " (max " + std::to_string(kCpuMaxModelDim) +
+                  " per side)";
+            return;
+        }
+        const int64_t input_bytes = 3 * mh * mw * 4;  // bounded by the check above
+        if (input_bytes > kCpuMaxInputBytes) {
+            err = "model input tensor too large: " + std::to_string(input_bytes) +
+                  " bytes";
+            return;
+        }
+        model_h_ = static_cast<int>(mh);
+        model_w_ = static_cast<int>(mw);
         ok_ = true;
     }
 
@@ -307,9 +376,16 @@ public:
             return false;
         }
         const char* in_names[1] = {input_name_.c_str()};
-        std::vector<const char*> onames{output_name_.c_str()};
-        if (decoder_)
+        // Decoder path: the complete output list, exactly once. Prepending
+        // output_name_ here duplicated output 0, which made every decoder run
+        // fetch the first tensor twice (and pushed a single ~9 MiB output over
+        // the 16 MiB VBT1 cap as soon as it was copied twice).
+        std::vector<const char*> onames;
+        if (decoder_) {
             for (const auto& nm : out_names_) onames.push_back(nm.c_str());
+        } else {
+            onames.push_back(output_name_.c_str());
+        }
         std::vector<OrtValue*> outs(onames.size(), nullptr);
         bool run_ok = ort_check(
             ort()->Run(session_, nullptr, in_names, &in, 1, onames.data(), onames.size(),
@@ -319,7 +395,8 @@ public:
         if (!run_ok) return false;
         double t2 = now_ms();
 
-        auto tensor_shape = [&](OrtValue* v, std::vector<int64_t>& dims) -> bool {
+        auto tensor_shape = [&](OrtValue* v, std::vector<int64_t>& dims,
+                                ONNXTensorElementDataType& elem_type) -> bool {
             OrtTypeInfo* ti = nullptr;
             if (!ort_check(ort()->GetTypeInfo(v, &ti), "GetTypeInfo", err)) return false;
             const OrtTensorTypeAndShapeInfo* shape = nullptr;
@@ -335,6 +412,9 @@ public:
             }
             dims.resize(ndim);
             bool ok = ort_check(ort()->GetDimensions(shape, dims.data(), ndim), "GetDimensions", err);
+            if (ok)
+                ok = ort_check(ort()->GetTensorElementType(shape, &elem_type),
+                               "GetTensorElementType", err);
             ort()->ReleaseTypeInfo(ti);
             return ok;
         };
@@ -342,9 +422,11 @@ public:
         if (decoder_) {
             // §6.11 M1.15: shared decoder over all outputs (batch assumed 1).
             std::vector<TensorView> views(outs.size());
+            std::vector<ONNXTensorElementDataType> elem_types(outs.size(),
+                                                              ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
             for (size_t oi = 0; oi < outs.size(); ++oi) {
                 std::vector<int64_t> dims;
-                if (!tensor_shape(outs[oi], dims)) {
+                if (!tensor_shape(outs[oi], dims, elem_types[oi])) {
                     for (OrtValue* v : outs) ort()->ReleaseValue(v);
                     return false;
                 }
@@ -366,13 +448,24 @@ public:
             if (decoder_is_raw_) {
                 // §6.12 dev mode: copy the raw outputs for VBT1 passthrough.
                 std::vector<DevTensor> cap;
-                for (const auto& v : views) {
+                for (size_t oi = 0; oi < views.size(); ++oi) {
+                    const TensorView& v = views[oi];
                     if (v.dims.size() > 4) continue;  // VBT1 carries up to 4 dims
+                    uint8_t dtype = 0;
+                    size_t elem_bytes = 0;
+                    // A raw model output is not necessarily float32: refuse
+                    // (loudly) rather than copy it at an assumed width.
+                    if (!cpu_vbt1_dtype(static_cast<int32_t>(elem_types[oi]), dtype,
+                                        elem_bytes, err)) {
+                        for (OrtValue* ov : outs) ort()->ReleaseValue(ov);
+                        return false;
+                    }
                     DevTensor t;
+                    t.dtype = dtype;
                     t.name = v.name;
                     for (int64_t d : v.dims) t.dims.push_back(static_cast<int32_t>(d));
                     const uint8_t* bytes = reinterpret_cast<const uint8_t*>(v.data);
-                    t.data.assign(bytes, bytes + v.count * sizeof(float));
+                    t.data.assign(bytes, bytes + v.count * elem_bytes);
                     cap.push_back(std::move(t));
                 }
                 std::lock_guard<std::mutex> lk(raw_mu_);
@@ -391,31 +484,23 @@ public:
             return true;
         }
 
-        // Output assumed [1, A, 5 + n_cls] (batch 1).
-        OrtTypeInfo* ti = nullptr;
-        if (!ort_check(ort()->GetTypeInfo(outs[0], &ti), "GetTypeInfo", err)) {
+        // Output assumed [1, A, 5 + n_cls] (batch 1). It is read as floats, so
+        // a quantised output is refused instead of reinterpreted at the wrong
+        // element width (same root cause as the raw-passthrough copy above).
+        std::vector<int64_t> dims;
+        ONNXTensorElementDataType elem_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+        if (!tensor_shape(outs[0], dims, elem_type)) {
             ort()->ReleaseValue(outs[0]);
             return false;
         }
-        const OrtTensorTypeAndShapeInfo* shape = nullptr;
-        if (!ort_check(ort()->CastTypeInfoToTensorInfo(ti, &shape), "CastTypeInfoToTensorInfo", err)) {
-            ort()->ReleaseTypeInfo(ti);
+        if (elem_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+            err = "cpu backend: output element type " +
+                  std::to_string(static_cast<int32_t>(elem_type)) +
+                  " is not float32 (quantised models need backend.decoder)";
             ort()->ReleaseValue(outs[0]);
             return false;
         }
-        size_t ndim = 0;
-        if (!ort_check(ort()->GetDimensionsCount(shape, &ndim), "GetDimensionsCount", err)) {
-            ort()->ReleaseTypeInfo(ti);
-            ort()->ReleaseValue(outs[0]);
-            return false;
-        }
-        std::vector<int64_t> dims(ndim);
-        bool dims_ok = ort_check(ort()->GetDimensions(shape, dims.data(), ndim), "GetDimensions", err);
-        ort()->ReleaseTypeInfo(ti);
-        if (!dims_ok) {
-            ort()->ReleaseValue(outs[0]);
-            return false;
-        }
+        const size_t ndim = dims.size();
         size_t elem = 1;
         for (int64_t d : dims) elem *= static_cast<size_t>(d);
         float* data = nullptr;
@@ -507,6 +592,7 @@ private:
     friend class CpuContext;
 
     std::string model_path_, sha256_, input_name_, output_name_;
+    std::vector<uint8_t> model_bytes_;  // verified bytes ORT loaded from
     std::unique_ptr<Decoder> decoder_;  // §6.11 backend.decoder (may be null)
     bool decoder_is_raw_ = false;       // §6.12 dev-mode raw passthrough
     std::mutex raw_mu_;                 // guards last_raw_
