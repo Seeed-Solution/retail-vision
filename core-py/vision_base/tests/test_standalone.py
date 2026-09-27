@@ -31,7 +31,13 @@ SCHEMAS = {
 }
 STREAMS = {"cam-a", "cam-b"}
 
-pytestmark = pytest.mark.native
+pytestmark = [
+    pytest.mark.native,
+    # Depth guard only: CI sets VB_RUNTIME_BIN to the freshly built binary so
+    # these tests really execute. Without it there is no binary to drive, and
+    # skipping beats a TypeError from a None executable path.
+    pytest.mark.skipif(not BIN, reason="VB_RUNTIME_BIN is not set"),
+]
 
 
 def run_standalone(tmp_path, *extra, seconds=4.0, config=FIXTURE):
@@ -122,3 +128,27 @@ def test_standalone_empty_streams(tmp_path):
         [BIN, "--standalone", "--config", str(cfg), "--output", "jsonl"],
         capture_output=True, timeout=10.0)
     assert proc.returncode == 1
+
+
+def test_standalone_dev_rejected():
+    """§6.12: --dev exists to hand VBT1 raw tensors to Python. standalone has no
+    tensor output, so the combination is refused at startup instead of silently
+    dropping the VBT1 records the operator expects."""
+    proc = subprocess.run(
+        [BIN, "--standalone", "--config", str(FIXTURE), "--output", "jsonl", "--dev"],
+        capture_output=True, timeout=10.0)
+    assert proc.returncode == 2
+    assert "--dev" in proc.stderr.decode()
+
+
+def test_standalone_records_never_interleave():
+    """§6.10.1: the status timer and the Writer thread share stdout, so every
+    line must be exactly one JSON document (a record split into body + newline
+    interleaves into "JSON_A JSON_B\\n\\n")."""
+    rc, out, err = run_standalone(None, "--frame-every", "1", "--status-every", "1",
+                                  seconds=5.0)
+    assert rc == 0, err
+    objs = parse_all(out)  # raises on any line that is not one JSON document
+    assert [o for o in objs if o["schema"] == "vb.status/1"]
+    assert [o for o in objs if o["schema"] == "vb.frame/1"]
+    assert not [l for l in out.splitlines() if not l.strip()]

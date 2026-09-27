@@ -11,7 +11,9 @@ import json
 import os
 import pathlib
 import signal
+import socket
 import ssl
+import struct
 import subprocess
 import sys
 import time
@@ -21,7 +23,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from fake_broker import FakeBroker  # noqa: E402
+from fake_broker import FakeBroker, _read_packet  # noqa: E402
 from vision_base.mqtt import MqttClient  # noqa: E402
 
 BIN = os.environ.get("VB_RUNTIME_BIN")
@@ -29,7 +31,12 @@ NOTLS_BIN = os.environ.get("VB_RUNTIME_BIN_NOTLS", "")
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "contracts" / "fixtures" / "vb" / "standalone_synthetic.json"
 
-pytestmark = pytest.mark.native
+pytestmark = [
+    pytest.mark.native,
+    # Depth guard only: CI sets VB_RUNTIME_BIN to the freshly built binary so
+    # these tests really execute (see the ci.yml "Python tests" step).
+    pytest.mark.skipif(not BIN, reason="VB_RUNTIME_BIN is not set"),
+]
 
 
 def wait_until(cond, timeout_s=10.0, msg="condition"):
@@ -51,12 +58,12 @@ def write_config(tmp_path, host, port, root="R", **mqtt):
     return p
 
 
-def start(tmp_path, host, port, *extra, config=None, root="R"):
+def start(tmp_path, host, port, *extra, config=None, root="R", env=None):
     cfg = config or write_config(tmp_path, host, port, root)
     proc = subprocess.Popen(
         [BIN, "--standalone", "--config", str(cfg), "--output", "mqtt",
          "--status-every", "2", *extra],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     return proc
 
 
@@ -166,6 +173,256 @@ def _resend_count(broker):
         k = (p["topic"], o["seq"], o["track_id"], o["type"])
         keyed[k] = keyed.get(k, 0) + 1
     return max(keyed.values()) if keyed else 0
+
+
+# ------------------------------------------- CONNECT flags / malformed framing
+
+def decode_connect(body):
+    """Decode a CONNECT payload from its own flag bits, the way a broker does.
+
+    Returns ``(info, consumed)``; ``consumed < len(body)`` means the flags do
+    not describe the strings that were written.
+    """
+    pos = 0
+
+    def rstr():
+        nonlocal pos
+        n = struct.unpack_from(">H", body, pos)[0]
+        pos += 2
+        s = body[pos:pos + n].decode()
+        pos += n
+        return s
+
+    proto = rstr()
+    level = body[pos]
+    flags = body[pos + 1]
+    keepalive = struct.unpack_from(">H", body, pos + 2)[0]
+    pos += 4
+    info = {"protocol": proto, "level": level, "flags": flags,
+            "keepalive": keepalive, "client_id": rstr(), "will": None,
+            "username": None, "password": None}
+    if flags & 0x04:
+        info["will"] = (rstr(), rstr())
+    if flags & 0x80:
+        info["username"] = rstr()
+    if flags & 0x40:
+        info["password"] = rstr()
+    return info, pos
+
+
+def capture_connect(tmp_path, *, timeout=10.0, **mqtt):
+    """Run the real client against a raw listener and return its CONNECT body."""
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    srv.settimeout(timeout)
+    cfg = write_config(tmp_path, "127.0.0.1", srv.getsockname()[1], "R", **mqtt)
+    proc = start(tmp_path, None, None, config=cfg)
+    conn = None
+    try:
+        conn, _ = srv.accept()
+        pkt = _read_packet(conn, bytearray())
+        assert pkt is not None and pkt[0] == 1, pkt
+        body = pkt[2]
+        conn.sendall(b"\x20\x02\x00\x00")  # CONNACK
+        return body
+    finally:
+        if conn is not None:
+            conn.close()
+        srv.close()
+        stop(proc)
+
+
+def test_connect_flags_follow_credentials(tmp_path):
+    """§6.10.3 / MQTT 3.1.1 §3.1.2: the user name (bit 7) and password (bit 6)
+    flags must describe the credentials in the payload.
+
+    Before the fix the flag byte stayed 0x2E while the payload carried user
+    name and password, so a broker that needs authentication parsed the will
+    payload as the credentials and never read them (``consumed < len(body)``).
+    """
+    body = capture_connect(tmp_path)
+    info, consumed = decode_connect(body)
+    assert info["flags"] == 0x2E  # clean session | will | QoS1 | retain
+    assert info["protocol"] == "MQTT" and info["level"] == 4
+    assert info["username"] is None and info["password"] is None
+    assert consumed == len(body)  # the flags account for every payload byte
+    will_topic, will_payload = info["will"]
+    assert will_topic == "R/status"
+    assert json.loads(will_payload) == {"schema": "vb.status/1", "online": False}
+    assert (info["flags"] >> 3) & 3 == 1  # will QoS1
+    assert info["flags"] & 0x20  # will retain
+    assert info["flags"] & 0x02  # clean session
+
+    body = capture_connect(tmp_path, username="alice")
+    info, consumed = decode_connect(body)
+    assert info["flags"] == 0xAE  # 0x2E | 0x80
+    assert info["username"] == "alice" and info["password"] is None
+    assert consumed == len(body)
+
+    body = capture_connect(tmp_path, username="alice", password="s3cret")
+    info, consumed = decode_connect(body)
+    assert info["flags"] == 0xEE  # 0x2E | 0x80 | 0x40
+    assert info["username"] == "alice" and info["password"] == "s3cret"
+    assert consumed == len(body)
+
+
+def test_password_without_username_rejected(tmp_path):
+    """MQTT 3.1.1 §3.1.2.9: the password flag requires the user name flag, so
+    a password-only config is refused at startup instead of being sent."""
+    broker = FakeBroker().start()
+    try:
+        cfg = write_config(tmp_path, broker.host, broker.port, "R",
+                           password="s3cret")
+        proc = subprocess.run(
+            [BIN, "--standalone", "--config", str(cfg), "--output", "mqtt"],
+            capture_output=True, timeout=10.0)
+        assert proc.returncode == 1
+        assert "password requires username" in proc.stderr.decode()
+        assert not broker.connects
+    finally:
+        broker.stop()
+
+
+def test_malformed_remaining_length_drops_connection(tmp_path):
+    """§6.10.3: a Remaining Length longer than 4 bytes is rejected.
+
+    These ten length bytes decode to 2^64-11, so the old parser's
+    ``pos = i + len`` wrapped back to 0 and re-parsed the same bytes on one
+    core forever — stop() could never join and the process ignored SIGTERM. The
+    client must drop the link here and still exit cleanly.
+    """
+    # 2^64-11 in MQTT's 7-bit-per-byte encoding, 10 bytes instead of the 4
+    # allowed by §2.2.3.
+    illegal_remaining_length = bytes([0xF5] + [0xFF] * 8 + [0x01])
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    srv.settimeout(10.0)
+    cfg = write_config(tmp_path, "127.0.0.1", srv.getsockname()[1], "R")
+    proc = start(tmp_path, None, None, config=cfg)
+    conn = None
+    try:
+        conn, _ = srv.accept()
+        pkt = _read_packet(conn, bytearray())
+        assert pkt is not None and pkt[0] == 1
+        conn.sendall(b"\x20\x02\x00\x00")  # CONNACK
+        conn.sendall(b"\x30" + illegal_remaining_length)
+        conn.settimeout(0.5)
+        closed = False
+        deadline = time.monotonic() + 6.0
+        while time.monotonic() < deadline:
+            try:
+                data = conn.recv(4096)
+            except socket.timeout:
+                continue  # still open and silent: keep waiting for the FIN
+            except OSError:
+                closed = True
+                break
+            if data == b"":
+                closed = True
+                break
+        assert closed, "client kept the connection after a malformed packet"
+    finally:
+        if conn is not None:
+            conn.close()
+        srv.close()
+        out, err = stop(proc)  # communicate(timeout=10) hangs if the parser spins
+        assert proc.returncode == 0, err
+
+
+def test_fragmented_puback_is_matched(tmp_path):
+    """§6.10.3: a PUBACK split across TCP segments must still clear the message.
+
+    The old reader discarded its receive buffer every round, so a fragmented
+    PUBACK was never matched and the QoS1 message was re-sent after the 5 s
+    timeout. The first PUBACK of every connection is written one byte at a
+    time here, and reconnects are accepted so a re-send would be visible.
+    """
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    cfg = write_config(tmp_path, "127.0.0.1", srv.getsockname()[1], "R")
+    proc = start(tmp_path, None, None, config=cfg)
+    conn = None
+    seen = {}
+    first_qos1 = True
+    deadline = time.monotonic() + 9.0
+    try:
+        while time.monotonic() < deadline:
+            srv.settimeout(max(0.1, deadline - time.monotonic()))
+            try:
+                conn, _ = srv.accept()
+            except (OSError, socket.timeout):
+                break
+            # One buffer per connection: _read_packet leaves extra bytes in it.
+            cbuf = bytearray()
+            pkt = _read_packet(conn, cbuf)
+            if pkt is None or pkt[0] != 1:
+                continue
+            conn.sendall(b"\x20\x02\x00\x00")  # CONNACK
+            while time.monotonic() < deadline:
+                conn.settimeout(max(0.1, deadline - time.monotonic()))
+                try:
+                    pkt = _read_packet(conn, cbuf)
+                except (OSError, socket.timeout):
+                    break  # connection dropped: the outer loop takes the reconnect
+                if pkt is None:
+                    continue
+                ptype, flags, body = pkt
+                if ptype != 3 or (flags >> 1) & 3 != 1:
+                    continue
+                tlen = struct.unpack_from(">H", body, 0)[0]
+                topic = body[2:2 + tlen].decode()
+                pos = 2 + tlen
+                pid = struct.unpack_from(">H", body, pos)[0]
+                payload = body[pos + 2:]
+                seen[(topic, payload)] = seen.get((topic, payload), 0) + 1
+                ack = struct.pack(">BBH", 0x40, 0x02, pid)
+                if first_qos1:
+                    for i in range(len(ack)):  # one TCP segment per byte
+                        conn.sendall(ack[i:i + 1])
+                        time.sleep(0.05)
+                    first_qos1 = False
+                else:
+                    conn.sendall(ack)
+        assert seen, "no QoS1 publish arrived"
+        duplicates = {k: v for k, v in seen.items() if v > 1}
+        assert not duplicates, duplicates
+    finally:
+        if conn is not None:
+            conn.close()
+        srv.close()
+        stop(proc)
+
+
+def test_shutdown_drains_queue_and_keeps_final_status(tmp_path):
+    """§6.10.1: shutdown drains what the caller queued and the last record is a
+    complete online:false status, not a two-field stub."""
+    broker = FakeBroker().start()
+    proc = start(tmp_path, broker.host, broker.port)
+    try:
+        wait_until(lambda: broker.connects, msg="CONNECT")
+        wait_until(lambda: [p for p in broker.published
+                            if p["topic"].startswith("R/events/")],
+                   timeout_s=8.0, msg="events")
+        out, err = stop(proc)
+        assert proc.returncode == 0, err
+        statuses = [json.loads(p["payload"]) for p in broker.published
+                    if p["topic"] == "R/status"]
+        final = statuses[-1]
+        assert final["online"] is False
+        for key in ("schema", "session_id", "device_id", "shards", "uptime_s",
+                    "streams"):
+            assert key in final, final
+        assert final["streams"], final
+        assert final["device_id"] == "synthetic-dev", final
+        assert {s["stream_id"] for s in final["streams"]} == {"cam-a", "cam-b"}, final
+    finally:
+        broker.stop()
 
 
 def test_queue_overflow_drops_oldest(tmp_path):
@@ -317,6 +574,47 @@ def test_tls_hostname_mismatch_fails(tmp_path):
     cfg = write_config(tmp_path, "127.0.0.1", broker.port, "R",
                        tls=True, ca_file=str(d / "ca.crt"))
     proc = start(tmp_path, None, None, config=cfg)
+    try:
+        time.sleep(3.0)
+        assert not broker.connects
+        assert not broker.published
+        out, err = stop(proc)
+        assert "certificate" in err.lower(), err
+    finally:
+        broker.stop()
+
+
+def test_tls_empty_ca_file_uses_system_store(tmp_path):
+    """§6.10.3: an empty ca_file means "use the system CA store".
+
+    With no ca_file configured the client must still verify the server against
+    the system trust store, so pointing SSL_CERT_FILE at the test CA has to make
+    the handshake succeed — before the fix SSL_VERIFY_PEER was set with no trust
+    anchors loaded at all and every system-CA broker failed.
+    """
+    d = make_certs(tmp_path, "sysca")
+    broker = serve_tls_broker(d)
+    cfg = write_config(tmp_path, "127.0.0.1", broker.port, "R", tls=True)
+    proc = start(tmp_path, None, None, config=cfg,
+                 env=dict(os.environ, SSL_CERT_FILE=str(d / "ca.crt")))
+    try:
+        wait_until(lambda: broker.connects, timeout_s=10.0, msg="TLS CONNECT")
+        m = broker.wait_publish("R/events/cam-a", timeout_s=8.0)
+        assert m is not None and m["qos"] == 1
+    finally:
+        stop(proc)
+        broker.stop()
+
+
+def test_tls_empty_ca_file_still_verifies(tmp_path):
+    """The system store is a real check: a CA that did not sign the server
+    certificate must still fail the handshake."""
+    good = make_certs(tmp_path, "good2")
+    bad = make_certs(tmp_path, "bad2")
+    broker = serve_tls_broker(good)
+    cfg = write_config(tmp_path, "127.0.0.1", broker.port, "R", tls=True)
+    proc = start(tmp_path, None, None, config=cfg,
+                 env=dict(os.environ, SSL_CERT_FILE=str(bad / "ca.crt")))
     try:
         time.sleep(3.0)
         assert not broker.connects

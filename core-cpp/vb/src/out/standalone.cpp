@@ -131,7 +131,8 @@ struct StandaloneApp {
             Json j = frame_json(device_id, sid, r);
             emit("frames/" + sid, json_dump(j), 0, false);
         }
-        // VBC1/VBS1 (replies, snapshots) are not part of standalone output.
+        // VBC1/VBS1 (replies, snapshots) are not part of standalone output;
+        // VBT1 cannot reach this sink because run_standalone refuses --dev.
     }
 
     void emit(const std::string& topic_suffix, const std::string& line, int qos,
@@ -147,6 +148,16 @@ struct StandaloneApp {
 }  // namespace
 
 int run_standalone(const StandaloneOpts& opts) {
+    // §6.12 dev mode exists to hand raw tensors (VBT1) to a Python consumer.
+    // standalone has no tensor output adapter, so a VBT1 record arriving here
+    // was silently dropped while the operator believed `--dev` produced
+    // tensors. Refuse the combination up front instead of ignoring it.
+    if (opts.dev) {
+        std::fprintf(stderr,
+                     "standalone: --dev is not supported (VBT1 tensor output "
+                     "requires --ipc-fd)\n");
+        return 2;
+    }
     std::string err;
     Json cfg;
     try {
