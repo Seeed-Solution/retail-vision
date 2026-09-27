@@ -167,6 +167,22 @@ class FakeBroker:
         for c in conns:
             self._drop(c)
 
+    def send_raw(self, data: bytes) -> None:
+        """Write raw bytes to every live connection.
+
+        Used for malformed-packet tests: the broker-side encoder cannot
+        produce a truncated PUBLISH, and the client is what is under test.
+        """
+        with self._lock:
+            conns = list(self._conns)
+        for c in conns:
+            if not c.alive:
+                continue
+            try:
+                c.sock.sendall(data)
+            except OSError:
+                self._drop(c)
+
     # ------------------------------------------------------------- per-conn
 
     def _handle(self, conn: _Conn) -> None:

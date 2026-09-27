@@ -11,6 +11,7 @@ import os
 import pathlib
 import signal
 import sys
+import threading
 import time
 import urllib.request
 
@@ -54,7 +55,8 @@ def free_port():
 
 
 def make_config(tmp_path, broker, *, n_streams=5, per_worker=2,
-                backoff=5.0, device="vb-test-01"):
+                backoff=5.0, device="vb-test-01", workers="auto",
+                app_module="vision_base.hooks:EchoApp", plugins=None):
     streams = [{"stream_id": f"cam-{i}", "url": f"fake://{i}"}
                for i in range(n_streams)]
     cfg = {
@@ -62,7 +64,7 @@ def make_config(tmp_path, broker, *, n_streams=5, per_worker=2,
         "device_id": device,
         "backend": {"name": "fake", "model_path": "/tmp/fake.onnx",
                     "input_size": [320, 320]},
-        "runtime": {"workers": "auto", "max_streams_per_worker": per_worker,
+        "runtime": {"workers": workers, "max_streams_per_worker": per_worker,
                     "restart_backoff_s": backoff, "open_timeout_s": 5.0},
         "native": {"binary": sys.executable, "hello_timeout_s": 10.0},
         "state_dir": str(tmp_path / "state"),
@@ -70,12 +72,46 @@ def make_config(tmp_path, broker, *, n_streams=5, per_worker=2,
                  "topic_root": f"site/vision/{device}",
                  "status_interval_s": 1.0},
         "health": {"host": "127.0.0.1", "port": free_port()},
-        "app": {"module": "vision_base.hooks:EchoApp"},
+        "app": {"module": app_module},
         "streams": streams,
     }
+    if plugins is not None:
+        cfg["analyzers"] = {"plugins": list(plugins)}
     path = tmp_path / "config.json"
     path.write_text(json.dumps(cfg))
     return load(str(path))
+
+
+def wait_ack(broker, topic, request_id, timeout_s=15.0):
+    """Wait for the ack of one specific request_id."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        for m in list(broker.published):
+            if m["topic"] != topic:
+                continue
+            try:
+                ack = json.loads(m["payload"])
+            except ValueError:
+                continue
+            if ack.get("request_id") == request_id:
+                return ack
+        time.sleep(0.05)
+    raise AssertionError(f"no ack for request_id {request_id!r}")
+
+
+def send_command(broker, root, device, request_id, command, params):
+    broker.publish_down(f"{root}/cmd/control", json.dumps({
+        "schema": "vb.command/1", "device_id": device,
+        "request_id": request_id, "command": command,
+        "params": params}).encode())
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 def get_healthz(port):
@@ -291,3 +327,367 @@ def test_real_runtime_two_shards(tmp_path, broker):
             for m in broker.published), timeout_s=15, what="echo publications")
     finally:
         sup.stop()
+
+
+# ------------------------------------------------------------- review items
+
+BAD_APP = '''
+class BadHealthApp:
+    name = "bad"
+    wants_frames = False
+    def configure(self, options, device_id): pass
+    def analyzers(self, spec): return []
+    def plugins(self): return []
+    def on_stream_added(self, ctx): pass
+    def on_stream_removed(self, ctx): pass
+    def on_event(self, ctx, ev): return []
+    def on_frame(self, ctx, res): return []
+    def health(self): return {"bad": {1, 2, 3}}       # not JSON serializable
+'''
+
+PLUGIN_APP = '''
+class PluginApp:
+    name = "plugin"
+    wants_frames = False
+    def configure(self, options, device_id): pass
+    def analyzers(self, spec): return []
+    def plugins(self): return ["/opt/vb/lib/app_extra.so"]
+    def on_stream_added(self, ctx): pass
+    def on_stream_removed(self, ctx): pass
+    def on_event(self, ctx, ev): return []
+    def on_frame(self, ctx, res): return []
+'''
+
+BAD_PLUGIN_APP = '''
+class BadPluginApp:
+    name = "badplugin"
+    wants_frames = False
+    def configure(self, options, device_id): pass
+    def analyzers(self, spec): return []
+    def plugins(self): return ["relative.so"]
+    def on_stream_added(self, ctx): pass
+    def on_stream_removed(self, ctx): pass
+    def on_event(self, ctx, ev): return []
+    def on_frame(self, ctx, res): return []
+'''
+
+
+def test_validate_app_health_boundaries():
+    """Review item 14: only a JSON-serializable dict of <= 4096 bytes may ride
+    the heartbeat; anything else becomes the specified error object."""
+    from vision_base.supervisor import (APP_HEALTH_INVALID, APP_HEALTH_MAX_BYTES,
+                                        validate_app_health)
+    ok = "x" * (APP_HEALTH_MAX_BYTES - len('{"b":""}'))
+    assert validate_app_health({"b": ok}) == {"b": ok}
+    too_big = "x" * (APP_HEALTH_MAX_BYTES - len('{"b":""}') + 1)
+    for bad in [None, [1], "s", {"s": {1, 2, 3}}, {"b": too_big},
+                {"d": object()}]:
+        assert validate_app_health(bad) == APP_HEALTH_INVALID
+
+
+def test_bad_app_health_is_replaced_not_forwarded(tmp_path, broker):
+    """Review item 14: an app returning an unserializable dict must not break
+    the heartbeat or the /healthz serialization."""
+    (tmp_path / "badhealth_app.py").write_text(BAD_APP)
+    cfg = make_config(tmp_path, broker, n_streams=0, per_worker=0,
+                      app_module="badhealth_app:BadHealthApp",
+                      device="vb-test-14")
+    sup = Supervisor(cfg, runtime_argv=FAKE_ARGV)
+    try:
+        sup.start()
+        port = sup.health_port
+        # `alive` alone is true from the first heartbeat, before the runtime
+        # and the publish session are up: wait for the 200
+        wait_for(lambda: get_healthz(port)[0] == 200, timeout_s=30,
+                 what="healthy supervisor")
+        code, body = get_healthz(port)
+        assert code == 200
+        assert body["shards"][0]["app"] == {"error": "app health invalid"}
+        assert body["app"] == {"error": "app health invalid"}
+        jsonschema.validate(body, HEALTHZ_SCHEMA)
+    finally:
+        sup.stop()
+
+
+def test_app_plugins_join_config_plugins(tmp_path, broker):
+    """Review item 15: AppHooks.plugins() must reach the runtime config that
+    the native child actually reads."""
+    (tmp_path / "plugin_app.py").write_text(PLUGIN_APP)
+    cfg = make_config(tmp_path, broker, n_streams=0, per_worker=0,
+                      app_module="plugin_app:PluginApp",
+                      plugins=["/opt/vb/lib/base.so"], device="vb-test-15")
+    sup = Supervisor(cfg, runtime_argv=FAKE_ARGV)
+    expect = ["/opt/vb/lib/base.so", "/opt/vb/lib/app_extra.so"]
+    try:
+        assert sup.cfg.analyzers["plugins"] == expect
+        assert sup._shard_args(0, [])["runtime_cfg"]["analyzers"]["plugins"] == expect
+        sup.start()
+        port = sup.health_port
+        wait_for(lambda: get_healthz(port)[1]["shards"][0]["runtime"]["alive"],
+                 timeout_s=30)
+        written = json.loads(
+            (tmp_path / "state" / "shard-0" / "rt-0.json").read_text())
+        assert written["analyzers"]["plugins"] == expect
+    finally:
+        sup.stop()
+
+
+def test_app_plugin_path_is_validated(tmp_path, broker):
+    """Review item 15: merging is not enough — the merged list is checked the
+    same way as analyzers.plugins."""
+    from vision_base.config import ConfigError
+    (tmp_path / "badplugin_app.py").write_text(BAD_PLUGIN_APP)
+    cfg = make_config(tmp_path, broker, n_streams=0, per_worker=0,
+                      app_module="badplugin_app:BadPluginApp",
+                      device="vb-test-15b")
+    with pytest.raises(ConfigError) as excinfo:
+        Supervisor(cfg, runtime_argv=FAKE_ARGV)
+    assert "app.plugins[0]" in str(excinfo.value)
+
+
+def test_single_process_shard_is_supervised_from_startup(tmp_path, broker):
+    """Review item 1: with workers=1 the shard is a supervisor thread; one that
+    dies before sending `started` must be restarted, not ignored."""
+    cfg = make_config(tmp_path, broker, n_streams=0, per_worker=0, workers=1,
+                      backoff=0.4, device="vb-test-01b")
+    state = tmp_path / "state" / "shard-0"
+    state.mkdir(parents=True)
+    victim = tmp_path / "victim.json"
+    victim.write_text("untouched")
+    (state / "rt-0.json").symlink_to(victim)     # every start attempt fails
+    sup = Supervisor(cfg, runtime_argv=FAKE_ARGV)
+    try:
+        sup.start()
+        wait_for(lambda: sup.shards and sup.shards[0].restarts >= 1,
+                 timeout_s=25, what="dead shard thread restarted")
+        assert sup.shards[0].in_process
+        assert victim.read_text() == "untouched"
+    finally:
+        sup.stop()
+
+
+def test_add_stream_while_runtime_is_restarting_is_acked_not_ok(tmp_path, broker):
+    """Review item 8: Shard.add_stream answers ok:false while the runtime is
+    restarting; that verdict has to reach the ack."""
+    cfg = make_config(tmp_path, broker, n_streams=1, per_worker=0, backoff=5.0,
+                      device="vb-test-08")
+    root = "site/vision/vb-test-08"
+    sup = Supervisor(cfg, runtime_argv=FAKE_ARGV)
+    try:
+        sup.start()
+        port = sup.health_port
+        wait_for(lambda: get_healthz(port)[1]["shards"][0]["runtime"]["alive"],
+                 timeout_s=30)
+        rt_pid = get_healthz(port)[1]["shards"][0]["runtime"]["pid"]
+        kill_pid(rt_pid)
+        wait_for(lambda: get_healthz(port)[1]["shards"][0]["runtime"]["restarts"] == 1,
+                 timeout_s=20, what="runtime restarts=1")
+        # the shard now sits in its 5 s backoff with no runtime client
+        send_command(broker, root, "vb-test-08", "r-add-restarting", "add_stream",
+                     {"stream_id": "cam-9", "url": "fake://9"})
+        ack = wait_ack(broker, f"{root}/cmd/ack", "r-add-restarting")
+        assert ack["ok"] is False
+        assert "restarting" in ack["error"]
+        assert [s["stream_id"] for s in sup.shards[0].streams] == ["cam-0"]
+    finally:
+        sup.stop()
+
+
+def test_new_shard_add_failure_is_acked_not_ok(tmp_path, broker, monkeypatch):
+    """Review item 8: the supervisor used to report a spawned shard as a
+    success without waiting for its add result."""
+    monkeypatch.setenv("FAKE_REJECT_STREAM", "cam-9")
+    cfg = make_config(tmp_path, broker, n_streams=1, per_worker=1, backoff=0.5,
+                      device="vb-test-08b")
+    root = "site/vision/vb-test-08b"
+    sup = Supervisor(cfg, runtime_argv=FAKE_ARGV)
+    try:
+        sup.start()
+        port = sup.health_port
+        wait_for(lambda: get_healthz(port)[1]["shards"][0]["alive"], timeout_s=30)
+        # per_worker=1 with one stream already: this needs a whole new shard
+        send_command(broker, root, "vb-test-08b", "r-add-new", "add_stream",
+                     {"stream_id": "cam-9", "url": "fake://9"})
+        ack = wait_ack(broker, f"{root}/cmd/ack", "r-add-new")
+        assert ack["ok"] is False
+        assert "synthetic rejection" in ack["error"]
+        assert len(sup.shards) == 1                 # the new shard was discarded
+        assert [s["stream_id"] for s in sup.shards[0].streams] == ["cam-0"]
+    finally:
+        sup.stop()
+
+
+def test_restart_reaps_a_stalled_shard(tmp_path, broker):
+    """Review item 10: the previous shard (and its vb-runtime) must be
+    reclaimed before its index is reused."""
+    cfg = make_config(tmp_path, broker, n_streams=1, per_worker=1, backoff=0.5,
+                      device="vb-test-10")
+    sup = Supervisor(cfg, runtime_argv=FAKE_ARGV)
+    old_pid = None
+    try:
+        sup.start()
+        port = sup.health_port
+        wait_for(lambda: get_healthz(port)[1]["shards"][0]["runtime"]["alive"],
+                 timeout_s=30)
+        old_pid = get_healthz(port)[1]["shards"][0]["pid"]
+        os.kill(old_pid, signal.SIGSTOP)     # alive, but no longer heartbeating
+
+        def replaced():
+            body = get_healthz(port)[1]
+            return (body["shards"][0]["pid"] not in (None, old_pid)
+                    and body["shards"][0]["alive"])
+        wait_for(replaced, timeout_s=30, what="replacement shard alive")
+        wait_for(lambda: not pid_alive(old_pid), timeout_s=15,
+                 what="stalled shard reclaimed")
+    finally:
+        if old_pid:
+            for sig in (signal.SIGCONT, signal.SIGKILL):
+                try:
+                    os.kill(old_pid, sig)
+                except OSError:
+                    pass
+        sup.stop()
+
+
+def test_restart_uses_the_current_stream_list(tmp_path, broker, monkeypatch):
+    """Review item 12: a stream removed while the restart backs off must not be
+    replayed by the new instance."""
+    cfg = make_config(tmp_path, broker, n_streams=1, per_worker=1, backoff=1.0,
+                      device="vb-test-12")
+    sup = Supervisor(cfg, runtime_argv=FAKE_ARGV)
+    try:
+        sup.start()
+        port = sup.health_port
+        wait_for(lambda: get_healthz(port)[1]["shards"][0]["runtime"]["alive"],
+                 timeout_s=30)
+        handle = sup.shards[0]
+        entered = threading.Event()
+        release = threading.Event()
+        orig_reclaim = sup._reclaim_shard
+
+        def reclaim(h):
+            orig_reclaim(h)
+            entered.set()
+            release.wait(10.0)      # hold the restart thread while the test
+                                    # removes the stream, as a control op would
+        monkeypatch.setattr(sup, "_reclaim_shard", reclaim)
+        t = threading.Thread(target=sup._restart_shard, args=(handle,))
+        t.start()
+        assert entered.wait(10.0), "restart never reached the backoff"
+        with sup._mu:
+            handle.streams = []
+        release.set()
+        t.join(15.0)
+        assert not t.is_alive()
+
+        new = sup.shards[0]
+        assert new is not handle and new.streams == []
+        wait_for(lambda: get_healthz(port)[1]["shards"][0]["alive"], timeout_s=20)
+        assert get_healthz(port)[1]["streams"] == []
+    finally:
+        sup.stop()
+
+
+def test_runtime_failure_marks_healthz_degraded(tmp_path, broker, monkeypatch):
+    """Review item 16: three pre-hello exits while the Python shard and the
+    MQTT session stay healthy must still report degraded."""
+    monkeypatch.setenv("FAKE_EXIT_BEFORE_HELLO", "1")
+    cfg = make_config(tmp_path, broker, n_streams=1, per_worker=0, backoff=0.3,
+                      device="vb-test-16")
+    sup = Supervisor(cfg, runtime_argv=FAKE_ARGV)
+    try:
+        sup.start()
+        port = sup.health_port
+        def gave_up():
+            body = get_healthz(port)[1]
+            # "error" is delivered by the shard's hook thread after its own
+            # backoff, so runtime.failed alone is not enough to read /healthz
+            states = {s["stream_id"]: s["state"] for s in body["streams"]}
+            return (body["shards"][0]["runtime"]["failed"]
+                    and states == {"cam-0": "error"})
+        wait_for(gave_up, timeout_s=30, what="runtime gave up, streams errored")
+        code, body = get_healthz(port)
+        assert code == 503 and body["status"] == "degraded"
+        assert body["shards"][0]["alive"] is True
+        assert body["mqtt"]["control_connected"] is True
+        assert {s["stream_id"]: s["state"] for s in body["streams"]} == \
+            {"cam-0": "error"}
+        jsonschema.validate(body, HEALTHZ_SCHEMA)
+    finally:
+        sup.stop()
+
+
+def test_healthz_control_connected_follows_the_live_session(tmp_path, broker):
+    """Review item 16: the health report used to keep the value sampled at
+    start() even after the control session dropped."""
+    cfg = make_config(tmp_path, broker, n_streams=0, per_worker=0,
+                      device="vb-test-16b")
+    sup = Supervisor(cfg, runtime_argv=FAKE_ARGV)
+    assert sup.healthz_snapshot()["mqtt"]["control_connected"] is False
+    sup.start()
+    try:
+        wait_for(lambda: sup.healthz_snapshot()["mqtt"]["control_connected"],
+                 timeout_s=15, what="control session up")
+        sup._control.close()
+        assert sup.healthz_snapshot()["mqtt"]["control_connected"] is False
+    finally:
+        sup.stop()
+
+
+def test_add_stream_ack_redacts_credentials(tmp_path, broker):
+    """Review item 21: the ack leaves the device on an unauthenticated topic,
+    so the stream URL is echoed with its credentials masked."""
+    cfg = make_config(tmp_path, broker, n_streams=1, per_worker=0, backoff=0.5,
+                      device="vb-test-21")
+    root = "site/vision/vb-test-21"
+    sup = Supervisor(cfg, runtime_argv=FAKE_ARGV)
+    try:
+        sup.start()
+        port = sup.health_port
+        wait_for(lambda: get_healthz(port)[1]["shards"][0]["alive"], timeout_s=30)
+        send_command(broker, root, "vb-test-21", "r-cred", "add_stream",
+                     {"stream_id": "cam-2",
+                      "url": "rtsp://admin:s3cret@cam.local/s1?token=abc"})
+        ack = wait_ack(broker, f"{root}/cmd/ack", "r-cred")
+        assert ack["ok"] is True
+        url = ack["applied"]["url"]
+        assert "s3cret" not in url and "token=abc" not in url
+        assert "***" in url
+        # the stored stream keeps the real URL: the runtime needs it
+        assert any("s3cret" in s["url"] for h in sup.shards for s in h.streams)
+    finally:
+        sup.stop()
+
+
+def test_control_queue_is_bounded(tmp_path, broker):
+    """Review item 22: the cmd/control queue needs a message count, a byte
+    budget and a per-message cap before it takes a slot."""
+    from vision_base.supervisor import (CMD_MESSAGE_MAX_BYTES,
+                                        CMD_QUEUE_MAX_MESSAGES)
+    cfg = make_config(tmp_path, broker, n_streams=0, per_worker=0,
+                      device="vb-test-22")
+    sup = Supervisor(cfg, runtime_argv=FAKE_ARGV)
+    payload = b'{"schema":"vb.command/1"}'
+    for _ in range(CMD_QUEUE_MAX_MESSAGES * 3):
+        sup._on_control_message("t", payload, False)
+    with sup._cmd_cv:
+        assert len(sup._cmd_q) == CMD_QUEUE_MAX_MESSAGES
+        assert sup._cmd_q_bytes == CMD_QUEUE_MAX_MESSAGES * len(payload)
+    assert sup._cmd_dropped == CMD_QUEUE_MAX_MESSAGES * 2
+
+    before = sup._cmd_dropped
+    sup._on_control_message("t", b"x" * (CMD_MESSAGE_MAX_BYTES + 1), False)
+    sup._on_control_message("t", b"not json", False)
+    sup._on_control_message("t", b"", False)
+    sup._on_control_message("t", b'["array"]', False)
+    assert sup._cmd_dropped == before + 4
+    with sup._cmd_cv:
+        assert len(sup._cmd_q) == CMD_QUEUE_MAX_MESSAGES
+
+    # retained payloads are ignored (broker replay), and draining frees bytes
+    sup._on_control_message("t", payload, True)
+    assert sup._cmd_dropped == before + 4
+    with sup._cmd_cv:
+        raw = sup._cmd_q.pop(0)
+        sup._cmd_q_bytes -= len(raw)
+    assert sup._cmd_q_bytes == (CMD_QUEUE_MAX_MESSAGES - 1) * len(payload)

@@ -380,20 +380,26 @@ def test_real_broker_basic():
         c.close()
 
 
-def test_publish_worker_retry_once_backoff_and_head_check():
-    """Review 2026-09-26: failed head is retried once after a growing backoff,
-    then dropped; a head already dropped by submit() is not popped twice."""
+def test_publish_worker_offline_keeps_head_and_order():
+    """Review item 9: while offline the head is retried, never dropped, and
+    re-sent in order once the session is back; the backoff still grows.
+
+    The previous behaviour (retry once, then drop the head either way)
+    silently lost every message when the outage outlived one backoff
+    interval, against the §6.7.1 offline-queue table.
+    """
     import threading as _th
     from vision_base.publish import PublishWorker
 
     class FlakyClient:
         def __init__(self):
             self.calls = []
+            self.online = False
             self.lock = _th.Lock()
         def publish(self, topic, data, qos=0, retain=False):
             with self.lock:
                 self.calls.append(topic)
-            return False
+            return self.online
 
     waits = []
     w = PublishWorker(FlakyClient(), queue_size=4)
@@ -402,14 +408,23 @@ def test_publish_worker_retry_once_backoff_and_head_check():
     w.submit("b", {"i": 2})
     w.start()
     deadline = time.time() + 3
+    while len(w.client.calls) < 4 and time.time() < deadline:
+        time.sleep(0.01)
+    assert w.stats()["queued"] == 2 and w.stats()["dropped"] == 0
+    assert set(w.client.calls[:4]) == {"a"}   # head retained, not dropped
+    assert waits[:2] == [1.0, 2.0]            # backoff grows across failures
+
+    # session back: everything goes out, in submission order
+    w.client.online = True
+    deadline = time.time() + 3
     while w.stats()["queued"] and time.time() < deadline:
         time.sleep(0.01)
     w.close()
-    assert w.client.calls[:4] == ["a", "a", "b", "b"]   # each tried twice
-    assert waits[:2] == [1.0, 2.0]                     # backoff grows across failures
-    assert w.stats()["failed"] == 2 and w.stats()["queued"] == 0
+    assert w.stats()["sent"] == 2
+    assert w.client.calls[-2:] == ["a", "b"]
 
-    # head replaced while waiting: the new head must survive
+    # head evicted by a full queue while offline: the new head survives and
+    # the evicted message is counted as dropped
     w2 = PublishWorker(FlakyClient(), queue_size=1)
     replaced = []
     def wait_and_replace(t):
@@ -425,4 +440,138 @@ def test_publish_worker_retry_once_backoff_and_head_check():
         time.sleep(0.01)
     w2.close()
     assert w2.dropped == 1
-    assert "c" in w2.client.calls
+    assert "a" in w2.client.calls and "c" in w2.client.calls
+
+
+def test_publish_worker_unserializable_payload_does_not_kill_thread(broker, client):
+    """Review item 3: one payload that cannot be JSON-encoded is dropped on
+    its own; the worker keeps draining the queue."""
+    assert client.connect(timeout_s=5.0)
+    w = PublishWorker(client, queue_size=8)
+    w.start()
+    w.submit("w/bad", {"bad": {1, 2, 3}})          # a set is not serializable
+    w.submit("w/good", {"ok": True})
+    m = broker.wait_publish("w/good")
+    assert m is not None and json.loads(m["payload"]) == {"ok": True}
+    assert w.stats()["failed"] == 1
+    assert w.stats()["queued"] == 0
+    assert broker.wait_publish("w/bad", timeout_s=0.2) is None
+    assert w.is_alive()
+    w.close()
+
+
+# ------------------------------------------------- review items 4, 17, 18
+
+class _StopStub:
+    """Stands in for the client's ``_stop`` Event so a test can record the
+    reconnect delays without waiting for them."""
+
+    def __init__(self):
+        self.delays: list[float] = []
+        self._set = False
+
+    def is_set(self) -> bool:
+        return self._set
+
+    def set(self) -> None:
+        self._set = True
+
+    def wait(self, timeout: float) -> bool:
+        self.delays.append(timeout)
+        return False
+
+
+def _drive_reconnects(outcomes, *, min_s=1.0, max_s=60.0):
+    """Run ``MqttClient._io_loop`` against scripted session outcomes."""
+    c = MqttClient("127.0.0.1", 1, "test-backoff",
+                   reconnect_min_s=min_s, reconnect_max_s=max_s)
+    stub = _StopStub()
+    c._stop = stub
+    queue = list(outcomes)
+
+    def fake_session():
+        outcome = queue.pop(0) if queue else "stop"
+        if outcome == "ok":
+            c._stats["connects"] += 1     # what a CONNACK(0) does
+        elif outcome == "stop":
+            stub.set()
+        return "synthetic"
+
+    c._run_session = fake_session
+    c._io_loop()
+    return stub.delays
+
+
+def test_reconnect_backoff_resets_after_connack(monkeypatch):
+    """Review item 4: k resets after a successful CONNACK, so the backoff does
+    not keep growing across sessions that did connect."""
+    monkeypatch.setattr("vision_base.mqtt.random.uniform", lambda a, b: 1.0)
+    delays = _drive_reconnects(["fail", "fail", "ok", "fail", "fail", "fail"])
+    assert delays == [1.0, 2.0, 1.0, 2.0, 4.0, 8.0]
+
+
+def test_reconnect_backoff_exponent_is_bounded(monkeypatch):
+    """Review item 4: a long outage must not build an exponent that raises
+    OverflowError before min() can cap the delay."""
+    monkeypatch.setattr("vision_base.mqtt.random.uniform", lambda a, b: 1.0)
+    delays = _drive_reconnects(["fail"] * 1100)
+    assert len(delays) == 1100
+    assert max(delays) == 60.0
+    assert delays[:3] == [1.0, 2.0, 4.0]
+
+
+def test_truncated_publish_is_a_session_failure_not_thread_death(broker):
+    """Review item 17: an empty PUBLISH body used to raise struct.error out of
+    the IO thread, which then never reconnected."""
+    c = make_client(broker)
+    try:
+        assert c.connect(timeout_s=5.0)
+        got = []
+        c.subscribe("cmd/#", 1, lambda t, p, r: got.append((t, p)))
+        wait_until(lambda: "cmd/#" in broker.subscribes, msg="SUBSCRIBE")
+        n0 = len(broker.connects)
+        broker.send_raw(bytes([0x30, 0x00]))     # PUBLISH, remaining length 0
+        wait_until(lambda: len(broker.connects) > n0, timeout_s=10.0,
+                   msg="reconnect after the malformed packet")
+        assert c.connected and got == []
+        # the session works again: the client is not wedged
+        deadline = time.monotonic() + 10.0
+        while not got and time.monotonic() < deadline:
+            broker.publish_down("cmd/x", b"hi", qos=0)
+            time.sleep(0.05)
+        assert [t for t, _ in got] == ["cmd/x"]
+    finally:
+        c.close()
+
+
+def test_on_publish_validates_lengths():
+    """Review item 17: topic, packet id and body length are all checked."""
+    from vision_base.mqtt import _ProtocolError
+    c = MqttClient("127.0.0.1", 1, "test-validate")
+    for flags, body in [
+        (0x00, b""),                       # no body at all
+        (0x00, b"\x00"),                   # half a topic length
+        (0x00, b"\x00\x05ab"),             # topic shorter than declared
+        (0x02, b"\x00\x01a"),              # qos1 without a packet id
+        (0x06, b"\x00\x01a\x00\x01"),      # reserved qos 3
+    ]:
+        with pytest.raises(_ProtocolError):
+            c._on_publish(None, flags, body)
+
+
+def test_inbound_packet_size_is_capped():
+    """Review item 18: a declared length near 256 MiB must be refused before
+    the receive buffer accumulates it."""
+    from vision_base.mqtt import MAX_INBOUND_PACKET, _ProtocolError
+    c = MqttClient("127.0.0.1", 1, "test-cap")
+    # remaining length 0x0FFFFFFF (268 MB) declared, nothing else buffered
+    c._rx_buf = bytes([0x30, 0xFF, 0xFF, 0xFF, 0x7F])
+    with pytest.raises(_ProtocolError):
+        c._try_parse()
+    assert MAX_INBOUND_PACKET < 0x0FFFFFFF
+    # a packet just under the cap is still parsed normally
+    payload = b"x" * 32
+    body = bytes([0x00, 0x01]) + b"a" + payload
+    assert len(body) < 128
+    c._rx_buf = bytes([0x30, len(body)]) + body
+    assert c._try_parse() == (3, 0, body)

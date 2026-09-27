@@ -126,3 +126,22 @@ def test_streams_file_overrides_streams(tmp_path):
     p.write_text(json.dumps(cfg_raw))
     cfg = load(str(p))
     assert [s["stream_id"] for s in cfg.streams] == ["file-01", "file-02"]
+
+
+def test_health_defaults_to_loopback(tmp_path):
+    """Review item 20: /healthz is unauthenticated and must not be reachable
+    from the network unless the configuration asks for it."""
+    from vision_base.config import DEFAULTS
+    assert DEFAULTS["health"]["host"] == "127.0.0.1"
+    cfg = {"schema": "vb.config/1", "device_id": "d",
+           "backend": {"name": "cpu", "model_path": "/m.onnx"},
+           "mqtt": {"host": "127.0.0.1", "topic_root": "t"},
+           "app": {"module": "vision_base.hooks:EchoApp"},
+           "streams": []}
+    path = tmp_path / "cfg.json"
+    path.write_text(json.dumps(cfg))
+    assert load(str(path)).health["host"] == "127.0.0.1"
+    # an explicit host is still honoured (opt-in exposure)
+    cfg["health"] = {"host": "0.0.0.0", "port": 8099}
+    path.write_text(json.dumps(cfg))
+    assert load(str(path)).health["host"] == "0.0.0.0"

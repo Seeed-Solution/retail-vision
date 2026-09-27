@@ -16,12 +16,27 @@ __all__ = ["ConfigApp"]
 
 
 def _num6(v: float) -> float:
-    """§6.10.2 consistency: Python side rounds to 6 decimals to match the
-    C++ ``%.6g`` JSON construction."""
+    """§6.10.2 rule 1: Python side rounds to 6 decimals, matching the C++
+    ``%.6f`` JSON construction (``%.6g`` — 6 *significant* digits — diverges
+    from ``round(x, 6)`` outside [0.1, 1), e.g. for ``inference_ms``)."""
     return round(float(v), 6)
 
 
+def _clip01(v: float) -> float:
+    """§6.10.2 rule 3: coordinates are clipped to [0, 1] after the source
+    transform. With letterbox padding a box covering the whole model canvas
+    back-computes outside the frame (1280x720 -> 640x640 gives
+    ``y=[-0.389, 1.389]``); that is a padding artefact, not image content."""
+    if v < 0.0:
+        return 0.0
+    if v > 1.0:
+        return 1.0
+    return v
+
+
 def _round6(obj):
+    """§6.10.2 rule 1, applied recursively inside ``fields``: floats only —
+    integers, booleans and strings keep their type."""
     if isinstance(obj, bool) or isinstance(obj, int):
         return obj
     if isinstance(obj, float):
@@ -105,14 +120,17 @@ class ConfigApp:
                 "track_id": d.track_id,
                 "class_id": d.class_id,
                 "score": _num6(d.score),
-                "box": [_num6(scx - sw / 2.0), _num6(scy - sh / 2.0),
-                        _num6(scx + sw / 2.0), _num6(scy + sh / 2.0)],
+                "box": [_num6(_clip01(scx - sw / 2.0)),
+                        _num6(_clip01(scy - sh / 2.0)),
+                        _num6(_clip01(scx + sw / 2.0)),
+                        _num6(_clip01(scy + sh / 2.0))],
             }
             if d.keypoints:
                 kps = []
                 for i in range(0, len(d.keypoints) - 2, 3):
                     sx, sy = to_source_norm(geom, d.keypoints[i], d.keypoints[i + 1])
-                    kps.append([_num6(sx), _num6(sy), _num6(d.keypoints[i + 2])])
+                    kps.append([_num6(_clip01(sx)), _num6(_clip01(sy)),
+                                _num6(d.keypoints[i + 2])])
                 dj["keypoints"] = kps
             if d.attrs:
                 names = attr_names or tuple(f"attr_{i}" for i in range(len(d.attrs)))

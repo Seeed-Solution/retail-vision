@@ -14,6 +14,7 @@ import threading
 import time
 from collections import deque
 
+from . import atomicio
 from .hooks import AppHooks, StreamContext
 from .runtime_client import RuntimeClient, RuntimeGone
 from .types import FrameResult, StreamSpec
@@ -26,6 +27,7 @@ HOOK_BUDGET_WINDOW_S = 10.0
 HOOK_BUDGET_DEFAULT_CORE = 0.10
 HOOK_BUDGET_ADVICE = ("per-frame hook exceeds budget; move it to a C ABI "
                       "analyzer plugin (docs/extending.md)")
+HOOK_SLOW_S = 1.0   # §6.5.1: a single hook call longer than this is `hook_slow`
 
 
 class Shard:
@@ -55,6 +57,10 @@ class Shard:
 
         self.last_stats: dict = {}
         self.runtime_restarts = 0
+        # §6.9 rule 2: set when restarting the vb-runtime has been given up.
+        # It rides the heartbeat into /healthz so the supervisor can report
+        # `degraded` even though this Python shard is still alive (item 16).
+        self.runtime_failed = False
         self.hook_frames_dropped: dict[int, int] = {}
         self.hello = None
         self.last_error = ""
@@ -66,6 +72,8 @@ class Shard:
                                  getattr(hooks, "on_tensors", None) is not None)
 
         self._client: RuntimeClient | None = None
+        self._starting: RuntimeClient | None = None   # hello in flight (item 11)
+        self._start_lock = threading.Lock()  # one start/restart attempt at a time
         self._cfg_path = ""
         self._mu = threading.Lock()          # client lifecycle transitions
         self._stopping = False
@@ -79,9 +87,11 @@ class Shard:
         self._frame_slots: dict[int, FrameResult] = {}
         self._frame_seen: dict[int, int] = {}
 
-        # hook CPU metering (§6.5.5 / §10.5④): (end_monotonic, method, dur)
-        # samples from the hook thread's time.thread_time().
-        self._hook_samples: deque = deque()
+        # hook CPU metering (§6.5.5 / §10.5④): CPU seconds accumulated per
+        # method inside the current 10 s window, plus the slowest single call.
+        self._hook_win_start = time.monotonic()
+        self._hook_win_cpu = {"on_frame": 0.0, "on_event": 0.0, "other": 0.0}
+        self.hook_slow = 0
         self._hook_budget_exceeded = False
         self._hook_warn_monotonic = 0.0
         self._cv = threading.Condition()
@@ -91,12 +101,10 @@ class Shard:
     # ------------------------------------------------------------------ start
 
     def start(self) -> None:
-        os.makedirs(self.state_dir, exist_ok=True)
+        atomicio.ensure_private_dir(self.state_dir)
         self._cfg_path = os.path.join(self.state_dir, f"rt-{self.index}.json")
-        tmp = self._cfg_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.runtime_cfg, f)
-        os.replace(tmp, self._cfg_path)      # atomic write (§6.9 rule 4)
+        # atomic + exclusive temp file (§6.9 rule 4, review item 23)
+        atomicio.write_json_atomic(self._cfg_path, self.runtime_cfg)
         self._hook_thread = threading.Thread(target=self._hook_loop,
                                              name=f"vb-hook-{self.index}",
                                              daemon=True)
@@ -104,11 +112,24 @@ class Shard:
         self._start_runtime()
 
     def stop(self, timeout_s: float = 5.0) -> None:
+        """Stop the runtime and the hook thread.
+
+        A start attempt may be in flight (item 11): killing the client it is
+        waiting on makes ``start()`` return at once, and the ``_start_lock``
+        join guarantees no restart thread is still about to install one.
+        """
         with self._mu:
             self._stopping = True
             client = self._client
+            starting = self._starting
+        if starting is not None:
+            starting.kill()          # unblocks the in-flight hello wait
         if client is not None:
             client.stop(timeout_s)
+        if self._start_lock.acquire(timeout=max(0.1, timeout_s)):
+            self._start_lock.release()
+        with self._mu:
+            self._client = None
         with self._cv:
             self._hook_stop = True
             self._cv.notify_all()
@@ -118,36 +139,74 @@ class Shard:
     # ------------------------------------------------------------ runtime mgmt
 
     def _start_runtime(self) -> None:
-        """Spawn vb-runtime and re-add all active streams (ascending index)."""
-        with self._mu:
-            if self._stopping:
+        """Spawn vb-runtime and re-add all active streams (ascending index).
+
+        Serialised by ``_start_lock`` so a watchdog restart and a control
+        operation cannot both spawn a child, and so ``stop()`` can wait for
+        the attempt to converge (report item 11).
+        """
+        with self._start_lock:
+            with self._mu:
+                if self._stopping:
+                    return
+                client = RuntimeClient(self.runtime_argv, self._cfg_path,
+                                       on_frame=self._on_frame,
+                                       on_event=self._on_event,
+                                       on_stats=self._on_stats,
+                                       on_state=self._on_state,
+                                       on_exit=self._on_exit,
+                                       on_tensors=self._on_tensors
+                                       if self.has_tensors_hook else None)
+                self._starting = client
+            try:
+                hello = client.start(self.hello_timeout_s)
+            except (TimeoutError, RuntimeGone):
+                # Pre-hello failures are counted and reported only here; the
+                # client's on_exit fires only after hello (M1.12 review
+                # 2026-09-26).
+                client.kill()
+                with self._mu:
+                    if self._starting is client:
+                        self._starting = None
+                self._handle_start_failure()
                 return
-        client = RuntimeClient(self.runtime_argv, self._cfg_path,
-                               on_frame=self._on_frame,
-                               on_event=self._on_event,
-                               on_stats=self._on_stats,
-                               on_state=self._on_state,
-                               on_exit=self._on_exit,
-                               on_tensors=self._on_tensors
-                               if self.has_tensors_hook else None)
-        try:
-            hello = client.start(self.hello_timeout_s)
-        except (TimeoutError, RuntimeGone):
-            # Pre-hello failures are counted and reported only here; the
-            # client's on_exit fires only after hello (M1.12 review 2026-09-26).
-            client.kill()
-            self._handle_start_failure()
-            return
-        with self._mu:
-            self._client = client
-            self._start_failures = 0
-        self.hello = hello
-        for idx in sorted(i for i in self._active):
-            ctx = self.contexts.get(idx)
-            if ctx is None:
-                continue
-            ctx._runtime = client     # snapshot/configure go to the live client
-            self._send_add(client, ctx, first=False)
+            with self._mu:
+                stopping = self._stopping
+                if self._starting is client:
+                    self._starting = None
+                if not stopping:
+                    self._client = client
+                    self._start_failures = 0
+            if stopping:
+                # stop() ran while hello was in flight: never install the
+                # client and never replay the streams (report item 11).
+                client.stop(timeout_s=2.0)
+                return
+            self.hello = hello
+            self.runtime_failed = False   # recovered (§6.9 rule 2)
+            for idx in sorted(i for i in self._active):
+                ctx = self.contexts.get(idx)
+                if ctx is None:
+                    continue
+                ctx._runtime = client  # snapshot/configure go to the live client
+                try:
+                    self._send_add(client, ctx, first=False)
+                except RuntimeGone:
+                    # The runtime died again mid-replay: leave the streams to
+                    # the client's on_exit path (one uniform restart) instead
+                    # of reporting per-stream errors on top of it.
+                    log.warning("shard %s: replay stopped, runtime gone at "
+                                "stream %s", self.index, idx)
+                    return
+                except Exception as exc:      # noqa: BLE001 - per stream
+                    # One rejected stream must not abandon the rest (report
+                    # item 2): report it and keep replaying the others.
+                    log.warning("shard %s: replay failed for stream %s: %s",
+                                self.index, idx, exc)
+                    with self._cv:
+                        self._fifo.append(("state", idx, "error",
+                                           f"replay failed: {exc}"))
+                        self._cv.notify()
 
     def _send_add(self, client: RuntimeClient, ctx: StreamContext, *, first: bool) -> None:
         spec = ctx.spec
@@ -191,6 +250,9 @@ class Shard:
             self._restart_thread.start()
 
     def _schedule_error_all(self) -> None:
+        # §6.9 rule 2: restarting stopped for good; say so in every status
+        # (report item 16 — the shard stays alive, so `alive` alone lies).
+        self.runtime_failed = True
         threading.Thread(target=self._deliver_error_all, daemon=True).start()
 
     def _restart_after_backoff(self) -> None:
@@ -270,7 +332,14 @@ class Shard:
     # ------------------------------------------------------------- stream ops
 
     def add_stream(self, spec: StreamSpec) -> dict:
-        """Add one stream; returns the native reply (ok:true)."""
+        """Add one stream; returns ``{"ok": bool, ...}``.
+
+        The stream is registered before the control line goes out — frames
+        and states for that index must not be dropped while ``add`` is in
+        flight — and the registration is rolled back when the native side
+        rejects the add, so a failed add no longer leaks the stream_id
+        forever (report item 7). The stream index itself is never reused.
+        """
         with self._mu:
             if spec.stream_id in self._by_stream_id:
                 raise ValueError(f"duplicate stream_id {spec.stream_id!r}")
@@ -284,12 +353,26 @@ class Shard:
             self._active.add(idx)
         if client is None:
             # runtime down (restarting or failed to start): register the
-            # stream; the restart path re-adds it once hello arrives.
+            # stream; the restart path re-adds it once hello arrives. The
+            # caller must pass this ok:false through (report item 8).
             self._schedule_restart()
             return {"ok": False, "error": "runtime restarting",
                     "stream_index": idx}
-        self._send_add(client, ctx, first=True)
+        try:
+            self._send_add(client, ctx, first=True)
+        except BaseException:
+            self._rollback_add(spec.stream_id, idx)
+            raise
         return {"ok": True, "stream_index": idx}
+
+    def _rollback_add(self, stream_id: str, idx: int) -> None:
+        with self._mu:
+            if self._by_stream_id.get(stream_id) == idx:
+                del self._by_stream_id[stream_id]
+            self.contexts.pop(idx, None)
+            self._active.discard(idx)
+        with self._cv:
+            self._frame_slots.pop(idx, None)
 
     def remove_stream(self, stream_id: str) -> dict:
         idx = self._by_stream_id.get(stream_id)
@@ -298,12 +381,31 @@ class Shard:
         client = self._client
         if client is not None:
             client.request("remove", self.open_timeout_s, stream_index=idx)
-        self._active.discard(idx)
+        # Stop reporting the stream immediately, but keep the context alive
+        # until the hook thread has delivered "stopped" and called
+        # on_stream_removed; the context travels with the queue item so the
+        # stream_id is free for a re-add at once and the mapping cannot leak
+        # (report item 7).
+        ctx = self.contexts.get(idx)
+        with self._mu:
+            self._active.discard(idx)
+            if self._by_stream_id.get(stream_id) == idx:
+                del self._by_stream_id[stream_id]
         with self._cv:
             self._fifo.append(("state", idx, "stopped", ""))
-            self._fifo.append(("removed", idx))
+            self._fifo.append(("removed", idx, ctx))
             self._cv.notify()
         return {"ok": True}
+
+    def _forget(self, idx: int) -> None:
+        """Drop every trace of a removed stream (report item 7)."""
+        with self._mu:
+            self.contexts.pop(idx, None)
+            self._active.discard(idx)
+        with self._cv:
+            self._frame_slots.pop(idx, None)
+            self._frame_seen.pop(idx, None)
+            self.hook_frames_dropped.pop(idx, None)
 
     def set_threshold(self, stream_id: str, value: float) -> dict:
         idx = self._by_stream_id.get(stream_id)
@@ -312,8 +414,14 @@ class Shard:
         client = self._client
         if client is None:
             raise RuntimeGone("runtime not running")
-        return client.request("set_threshold", self.open_timeout_s,
-                              stream_index=idx, value=value)
+        reply = client.request("set_threshold", self.open_timeout_s,
+                               stream_index=idx, value=value)
+        # Keep the shard's own copy in step: it is what a vb-runtime restart
+        # replays and what status reports (report item 6).
+        ctx = self.contexts.get(idx)
+        if ctx is not None:
+            ctx.spec.score_threshold = value
+        return reply
 
     # ------------------------------------------------------------- hook thread
 
@@ -342,7 +450,10 @@ class Shard:
 
     def _run_hook_item(self, item) -> None:
         kind = item[0]
-        ctx = self.contexts.get(item[1])
+        if kind == "removed":
+            ctx = item[2]            # carried by remove_stream: see _forget()
+        else:
+            ctx = self.contexts.get(item[1])
         if ctx is None:
             return
         if kind == "state":
@@ -351,6 +462,7 @@ class Shard:
             self._call_hook(self.hooks.on_stream_added, ctx)
         elif kind == "removed":
             self._call_hook(self.hooks.on_stream_removed, ctx)
+            self._forget(item[1])
         elif kind == "event":
             outs = self._call_hook(self.hooks.on_event, ctx, item[2]) or []
             for o in outs:
@@ -395,15 +507,25 @@ class Shard:
             return None
         finally:
             dur = time.thread_time() - t0
+            if dur > HOOK_SLOW_S:
+                # §6.5.1: one call over a second is worth a warning and the
+                # `hook_slow` count (report item 13).
+                self.hook_slow += 1
+                log.warning("shard %s: hook %s took %.3f s", self.index,
+                            method, dur)
             now = time.monotonic()
             with self._cv:
-                self._hook_samples.append((now, method, dur))
-                # prune samples older than the window (+ slack)
-                while self._hook_samples and \
-                        now - self._hook_samples[0][0] > HOOK_BUDGET_WINDOW_S + 1.0:
-                    self._hook_samples.popleft()
+                self._roll_hook_window_locked(now)
+                self._hook_win_cpu[method] += dur
 
     # -------------------------------------------------------- hook budget
+
+    def _roll_hook_window_locked(self, now: float) -> None:
+        """Open a fresh 10 s window once the current one has run its course."""
+        if now - self._hook_win_start < HOOK_BUDGET_WINDOW_S:
+            return
+        self._hook_win_start = now
+        self._hook_win_cpu = {"on_frame": 0.0, "on_event": 0.0, "other": 0.0}
 
     def _hook_budget_core(self) -> float:
         try:
@@ -414,19 +536,19 @@ class Shard:
         return value if value > 0 else HOOK_BUDGET_DEFAULT_CORE
 
     def hook_budget_status(self) -> dict:
-        """§6.5.5: 10 s rolling window of hook-thread CPU (thread_time)."""
+        """§6.5.5: CPU of the hook thread accumulated over a 10 s window.
+
+        The denominator is the window (``÷ 10``), never the age of the oldest
+        sample: dividing by "time since the earliest sample" turned a single
+        0.02 s call sampled 0.1 s later into 0.2 core instead of 0.002
+        (report item 13).
+        """
         budget = self._hook_budget_core()
         now = time.monotonic()
-        per = {"on_frame": 0.0, "on_event": 0.0, "other": 0.0}
-        span = 0.0
         with self._cv:
-            samples = list(self._hook_samples)
-        samples = [s for s in samples if now - s[0] <= HOOK_BUDGET_WINDOW_S]
-        if samples:
-            span = min(HOOK_BUDGET_WINDOW_S, now - samples[0][0])
-            for _t, method, dur in samples:
-                per[method if method in per else "other"] += dur
-        core = (sum(per.values()) / span) if span > 0 else 0.0
+            self._roll_hook_window_locked(now)
+            per = dict(self._hook_win_cpu)
+        core = sum(per.values()) / HOOK_BUDGET_WINDOW_S
         exceeded = core > budget
         if exceeded and not self._hook_budget_exceeded and \
                 now - self._hook_warn_monotonic >= 60.0:
@@ -437,6 +559,7 @@ class Shard:
         return {
             "core": round(core, 6), "limit": budget, "exceeded": exceeded,
             "by_method": {k: round(v, 6) for k, v in per.items()},
+            "slow": self.hook_slow,
             "advice": HOOK_BUDGET_ADVICE if exceeded else "",
         }
 
@@ -451,6 +574,7 @@ class Shard:
         pid = client.pid if client is not None else None
         st = procstat.sample(pid) if pid else {"rss_kb": None, "cpu_s": None}
         return {"pid": pid, "alive": bool(alive),
+                "failed": bool(self.runtime_failed and not alive),
                 "restarts": self.runtime_restarts,
                 "rss_kb": st["rss_kb"], "cpu_s": st["cpu_s"],
                 "version": self.hello.runtime_version if self.hello else "",

@@ -234,3 +234,38 @@ def test_all_generated_acks_pass_schema():
         ack = plane.handle(req, SESSION, 123, ops)
         assert ack is not None
         jsonschema.validate(ack, ACK_SCHEMA)
+
+
+# ------------------------------------------------------------ review item 21
+
+def test_redact_url_masks_userinfo_and_sensitive_query_values():
+    from vision_base.control import redact_url
+    assert redact_url("rtsp://admin:s3cret@cam.local:554/s1") == \
+        "rtsp://***:***@cam.local:554/s1"
+    assert redact_url("rtsp://admin:s3cret@cam.local/s1?token=abc&x=1") == \
+        "rtsp://***:***@cam.local/s1?token=***&x=1"
+    assert redact_url("http://cam/s?password=p&api_key=k&mode=hi") == \
+        "http://cam/s?password=***&api_key=***&mode=hi"
+    # untouched when there is nothing to hide
+    for url in ("rtsp://cam.local/s1", "fake://0", "", "not a url"):
+        assert redact_url(url) == url
+
+
+def test_control_request_without_request_id_is_not_logged_verbatim(caplog):
+    """Review item 21: the missing-request_id warning used to dump the whole
+    request, RTSP credentials included."""
+    import logging
+    plane = ControlPlane("dev-1")
+    req = {"schema": "vb.command/1", "device_id": "dev-1",
+           "command": "add_stream",
+           "params": {"stream_id": "cam-0",
+                      "url": "rtsp://admin:s3cret@cam.local/s1?token=abc"}}
+    with caplog.at_level(logging.WARNING, logger="vision_base.control"):
+        assert plane.handle(req, "sess", 1, Ops()) is None
+    assert caplog.records, "expected a warning"
+    for record in caplog.records:
+        text = record.getMessage()
+        assert "s3cret" not in text and "abc" not in text
+        assert "rtsp://" not in text and "admin:" not in text
+        # only the parameter *names* are logged, not the request body
+        assert "params=['stream_id', 'url']" in text

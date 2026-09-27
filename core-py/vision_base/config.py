@@ -38,7 +38,10 @@ DEFAULTS: dict = {
     "analyzers": {"plugins": []},
     "mqtt": {"port": 1883, "username": "", "password": "", "tls": False,
              "ca_file": "", "cert_file": "", "key_file": "", "keepalive_s": 30, "status_interval_s": 10},
-    "health": {"host": "0.0.0.0", "port": 8099},
+    # §6.8: /healthz is unauthenticated, so it must not be reachable from the
+    # network by default — an explicit host is required to expose it
+    # (review item 20; the port number itself is unchanged).
+    "health": {"host": "127.0.0.1", "port": 8099},
     "streams_file": "",
     "streams": [],
     "app": {"name": "echo", "options": {"publish_hz": 1.0, "frame_stride": 1}},
@@ -113,6 +116,33 @@ def _check_int(value, path: str, *, minimum: int) -> None:
 
 def _check_threshold(value, path: str) -> None:
     _check_num(value, path, lo=0.0, hi=1.0)
+
+
+def _check_plugin_path(value, path: str) -> None:
+    """§6.6 `analyzers.plugins[]`: absolute path to a plugin .so."""
+    _check_str(value, path)
+    if not os.path.isabs(value):
+        _err(path, "must be an absolute path")
+    if not value.endswith(".so"):
+        _err(path, "must end with '.so'")
+
+
+def merge_plugins(config_plugins, app_plugins, *,
+                  path: str = "app.plugins") -> list[str]:
+    """§6.5: the application's ``plugins()`` joins ``analyzers.plugins``.
+
+    The merged list is what goes into every per-shard runtime config
+    (``runtime_config``), so both sources are validated identically and
+    duplicates collapse. Report item 15: the orchestration layer used to
+    read ``cfg.analyzers.plugins`` only, so an application that loaded its
+    own analyzer plugin silently ran without it.
+    """
+    out = list(config_plugins or [])
+    for i, p in enumerate(app_plugins or []):
+        _check_plugin_path(p, f"{path}[{i}]")
+        if p not in out:
+            out.append(p)
+    return out
 
 
 # §6.2 built-in analyzer names (§6.6 streams[].options.analyzers validation, M1.20)
@@ -301,11 +331,7 @@ def _validate(data: dict, *, partial: bool = False, allow_dev: bool = False) -> 
     if not isinstance(plugins, list):
         _err("analyzers.plugins", "must be an array")
     for i, p in enumerate(plugins):
-        _check_str(p, f"analyzers.plugins[{i}]")
-        if not os.path.isabs(p):
-            _err(f"analyzers.plugins[{i}]", "must be an absolute path")
-        if not p.endswith(".so"):
-            _err(f"analyzers.plugins[{i}]", "must end with '.so'")
+        _check_plugin_path(p, f"analyzers.plugins[{i}]")
 
     # mqtt
     mqtt = _merge(DEFAULTS["mqtt"], data.get("mqtt", {}))

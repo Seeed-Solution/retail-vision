@@ -20,10 +20,28 @@ from typing import Callable
 
 log = logging.getLogger("vision_base.mqtt")
 
-MAX_PAYLOAD = 1024 * 1024  # 1 MiB
+MAX_PAYLOAD = 1024 * 1024  # 1 MiB, outgoing
+# Inbound limits (BASE-1 review item 18): the broker is not trusted to declare
+# a packet size we then accumulate verbatim — without a cap a single 4-byte
+# remaining-length header can make us buffer close to 256 MiB. Our own
+# publishes are <= 1 MiB, so 4 MiB leaves headroom for a peer with larger
+# payloads while bounding both one packet and the receive buffer.
+MAX_INBOUND_PACKET = 4 * 1024 * 1024
+MAX_RX_BUFFER = MAX_INBOUND_PACKET + 5
+# Consecutive reconnect failures before the backoff is pinned at
+# reconnect_max_s; also bounds the `2 ** k` exponent so it can never overflow.
+_MAX_BACKOFF_EXPONENT = 32
 SUBACK_TIMEOUT_S = 5.0
 
 __all__ = ["Will", "MqttClient"]
+
+
+class _ProtocolError(Exception):
+    """Peer sent a malformed packet; the session must be torn down.
+
+    Never fatal to the IO thread: ``_run_session`` converts it into a session
+    failure so the normal backoff reconnect path takes over (§6.7.1).
+    """
 
 
 @dataclass(frozen=True)
@@ -317,7 +335,14 @@ class MqttClient:
     def _io_loop(self) -> None:
         k = 0
         while not self._stop.is_set():
+            connects_before = self._stats["connects"]
             reason = self._run_session()
+            if self._stats["connects"] > connects_before:
+                # §6.7.1: k is reset after CONNACK(0), so the backoff only
+                # grows while *consecutive* attempts fail to establish a
+                # session (report: a session that connects then drops must
+                # not inherit the exponent of the outage before it).
+                k = 0
             if self._stop.is_set():
                 break
             self._stats["disconnects"] += 1
@@ -329,10 +354,13 @@ class MqttClient:
                     cb(reason)
                 except Exception:
                     log.exception("on_disconnect callback failed")
-            # backoff reconnect_min_s * 2^k, capped, ±20% jitter
-            base = min(self.reconnect_max_s, self.reconnect_min_s * (2 ** k))
+            # backoff reconnect_min_s * 2^k, capped, ±20% jitter. The exponent
+            # is clamped *before* the power: an unbounded k makes `2 ** k`
+            # raise OverflowError on the float multiply (report item 4).
+            base = min(self.reconnect_max_s,
+                       self.reconnect_min_s * (2 ** min(k, _MAX_BACKOFF_EXPONENT)))
             delay = base * random.uniform(0.8, 1.2)
-            k += 1
+            k = min(k + 1, _MAX_BACKOFF_EXPONENT)
             if self._stop.wait(delay):
                 break
 
@@ -423,6 +451,10 @@ class MqttClient:
                 elif ptype == 13:  # PINGRESP
                     pass
             return "closed"
+        except _ProtocolError as exc:
+            # Malformed peer data is a session failure, not a client death:
+            # return normally so _io_loop reconnects with backoff (§6.7.1).
+            return f"protocol error: {exc}"
         except (OSError, ssl.SSLError) as exc:
             return f"socket error: {exc}"
         finally:
@@ -528,7 +560,14 @@ class MqttClient:
             if i > 4:
                 raise OSError("malformed remaining length")
         total = i + val
+        if total > MAX_INBOUND_PACKET:
+            raise _ProtocolError(f"inbound packet too large: {total} bytes")
         if len(buf) < total:
+            if len(buf) > MAX_RX_BUFFER:
+                # Backstop for the invariant the packet cap establishes: with
+                # `total` bounded, the buffer can only reach one packet plus a
+                # recv chunk, so this means the parse loop stopped consuming.
+                raise _ProtocolError("receive buffer overflow")
             return None
         ptype = buf[0] >> 4
         flags = buf[0] & 0x0F
@@ -539,13 +578,31 @@ class MqttClient:
     # ------------------------------------------------------------ dispatchers
 
     def _on_publish(self, sock, flags: int, body: bytes) -> None:
+        """Dispatch one inbound PUBLISH.
+
+        Every length field is validated before use (report item 17): an
+        empty or truncated body used to raise ``struct.error``, which no
+        caller caught, so the IO thread died and the client never
+        reconnected. Protocol damage now raises ``_ProtocolError``, which
+        ``_run_session`` turns into an ordinary session failure.
+        """
         qos = (flags >> 1) & 0x03
         retain = bool(flags & 0x01)
+        if qos == 3:
+            raise _ProtocolError("PUBLISH with reserved qos 3")
+        if len(body) < 2:
+            raise _ProtocolError(f"truncated PUBLISH: {len(body)} byte body")
         tlen = struct.unpack_from(">H", body, 0)[0]
-        topic = body[2:2 + tlen].decode("utf-8", "replace")
         pos = 2 + tlen
+        if pos > len(body):
+            raise _ProtocolError(
+                f"truncated PUBLISH topic: declared {tlen} bytes, "
+                f"{len(body) - 2} available")
+        topic = body[2:pos].decode("utf-8", "replace")
         pid = None
         if qos > 0:
+            if pos + 2 > len(body):
+                raise _ProtocolError("truncated PUBLISH packet id")
             pid = struct.unpack_from(">H", body, pos)[0]
             pos += 2
         payload = body[pos:]

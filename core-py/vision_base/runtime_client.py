@@ -14,6 +14,7 @@ import socket
 import struct
 import subprocess
 import threading
+import time
 from typing import Callable
 
 from . import wire
@@ -133,7 +134,14 @@ class RuntimeClient:
     # --------------------------------------------------------------- requests
 
     def request(self, op: str, timeout_s: float, **fields) -> dict:
-        """Send one control line and block for the matching reply (by req)."""
+        """Send one control line and block for the matching reply (by req).
+
+        The write lock and the send share one deadline (report item 19): if
+        the child is alive but no longer reading its socket, ``sendall`` used
+        to block forever while holding the write lock, so ``stop()`` — which
+        itself goes through ``request("stop")`` — could never be honoured and
+        the process was left behind.
+        """
         if threading.get_ident() == self._reader_ident:
             raise RuntimeError("request from reader thread would deadlock")
         req = f"r-{next(self._req_ids)}"
@@ -141,19 +149,31 @@ class RuntimeClient:
         entry = _Reply()
         with self._pending_lock:
             self._pending[req] = entry
+        deadline = time.monotonic() + timeout_s
         try:
             line = wire.encode_control_line(msg)
-            with self._write_lock:
-                if self._sock is None:
+            if not self._write_lock.acquire(
+                    timeout=max(0.0, deadline - time.monotonic())):
+                raise TimeoutError(f"{op} timed out waiting for the write lock")
+            try:
+                sock = self._sock
+                if sock is None:
                     raise RuntimeGone("runtime closed")
-                self._sock.sendall(line)
+                self._send_all(sock, line, deadline, op)
+            finally:
+                self._write_lock.release()
         except BaseException as e:
             with self._pending_lock:
                 self._pending.pop(req, None)
+            if isinstance(e, TimeoutError):
+                # send/lock deadline hit (item 19). Not "the runtime is
+                # gone": the child may still be alive and merely not reading,
+                # so the caller keeps its own timeout semantics.
+                raise
             if isinstance(e, (RuntimeGone, OSError)):
                 raise RuntimeGone(f"cannot send {op}: {e}") from e
             raise
-        if not entry.event.wait(timeout_s):
+        if not entry.event.wait(max(0.0, deadline - time.monotonic())):
             with self._pending_lock:
                 self._pending.pop(req, None)
             raise TimeoutError(f"{op} timed out after {timeout_s}s")
@@ -183,11 +203,14 @@ class RuntimeClient:
 
     def stop(self, timeout_s: float = 5.0) -> None:
         """Clean stop; SIGTERM after timeout, SIGKILL 2 s later (§6.4)."""
-        self._closed = True
         try:
             self.request("stop", timeout_s)
-        except (TimeoutError, RuntimeError_, RuntimeGone, RuntimeError):
+        except (TimeoutError, RuntimeError_, RuntimeGone, RuntimeError, OSError):
             pass
+        # Only now is the socket off limits: the stop control line above must
+        # still be able to leave (a writer that is already stuck is released
+        # by the shutdown in _close_socket).
+        self._closed = True
         if self.proc is not None:
             try:
                 self.proc.wait(timeout_s)
@@ -198,12 +221,7 @@ class RuntimeClient:
                 except subprocess.TimeoutExpired:
                     self.proc.kill()
                     self.proc.wait(2.0)
-        if self._sock is not None:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
+        self._close_socket()
         if self._reader is not None:
             self._reader.join(timeout_s)
 
@@ -215,14 +233,63 @@ class RuntimeClient:
                 self.proc.wait(2.0)
             except subprocess.TimeoutExpired:
                 pass
-        if self._sock is not None:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
+        self._close_socket()
         if self._reader is not None:
             self._reader.join(2.0)
+
+    def _send_all(self, sock: socket.socket, data: bytes, deadline: float,
+                  op: str) -> None:
+        """Write *data* without ever blocking past *deadline* (report item 19).
+
+        ``socket.sendall`` has no timeout of its own: when the child stops
+        reading, it waits forever with the write lock held, and ``stop()`` —
+        which sends a control line of its own — can then never be honoured.
+
+        ``select`` alone does not fix it on a stream socket: it reports
+        "writable" for any room at all, and the blocking ``send`` of a large
+        buffer then waits for the whole thing. ``SO_SNDTIMEO`` bounds each
+        individual send — send direction only, so the reader thread's
+        blocking ``recv`` is untouched — and the deadline is re-checked
+        between chunks.
+        """
+        self._set_send_timeout(sock, max(0.01, min(0.5, deadline - time.monotonic())))
+        view = memoryview(data)
+        while view:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"{op} send timed out")
+            if self._closed:
+                raise RuntimeGone(f"cannot send {op}: runtime closed")
+            try:
+                sent = sock.send(view)
+            except BlockingIOError:
+                continue        # kernel send buffer full; retry until deadline
+            if sent == 0:
+                raise RuntimeGone(f"cannot send {op}: socket closed by peer")
+            view = view[sent:]
+
+    @staticmethod
+    def _set_send_timeout(sock: socket.socket, seconds: float) -> None:
+        tv = struct.pack("@ll", int(seconds), int((seconds % 1) * 1e6))
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, tv)
+        except (OSError, AttributeError):
+            pass
+
+    def _close_socket(self) -> None:
+        """Shutdown then close: unblocks any writer stuck in ``_send_all``."""
+        sock = self._sock
+        self._sock = None
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------ reader
 

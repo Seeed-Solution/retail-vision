@@ -39,6 +39,7 @@ class StreamContext:
         self.last_state: str | None = None
         self._runtime = runtime
         self._analyzers: dict[str, dict] = {}   # latest successful configs
+        self._base_analyzers: list[dict] | None = None   # hooks.analyzers(spec)
 
     def request_snapshot(self, seq: int = 0, track_id: int = 0, crop: bool = True,
                          max_side: int = 640, timeout_s: float = 3.0) -> tuple[dict, bytes]:
@@ -62,10 +63,30 @@ class StreamContext:
         return reply.get("applied", reply)
 
     def analyzer_configs(self, hooks: "AppHooks") -> list[dict]:
-        """Configs to (re)send on add: latest configure_analyzer wins (§6.5.3)."""
-        if self._analyzers:
-            return [{"name": n, "config": c} for n, c in self._analyzers.items()]
-        return list(hooks.analyzers(self.spec))
+        """Configs to (re)send on add: latest configure_analyzer wins (§6.5.3).
+
+        The stream's analyzer *set* comes from ``hooks.analyzers(spec)`` and
+        ``configure_analyzer`` overrides one entry by name. Returning only the
+        updated names (report item 5) dropped every other analyzer the moment
+        the app reconfigured one of them, so the next vb-runtime restart
+        replayed an incomplete set.
+        """
+        if self._base_analyzers is None:
+            self._base_analyzers = [dict(a) for a in hooks.analyzers(self.spec)]
+        out: list[dict] = []
+        overridden: set[str] = set()
+        for entry in self._base_analyzers:
+            name = entry.get("name")
+            if name in self._analyzers:
+                out.append({"name": name, "config": self._analyzers[name]})
+                overridden.add(name)
+            else:
+                out.append({"name": name, "config": entry.get("config", {})})
+        # analyzers configured before/without being in hooks.analyzers(spec)
+        for name, config in self._analyzers.items():
+            if name not in overridden:
+                out.append({"name": name, "config": config})
+        return out
 
 
 @runtime_checkable

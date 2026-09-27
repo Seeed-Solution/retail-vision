@@ -175,3 +175,35 @@ def test_on_frame_and_on_event_delivery():
     idx, ev = events[0]
     assert idx == 3 and ev.type == "tick" and ev.analyzer == "tick"
     client.stop()
+
+
+def test_stop_reclaims_child_that_stopped_reading(monkeypatch):
+    """Review item 19: a child that is alive but no longer drains its socket
+    must not be able to keep ``stop()`` from reclaiming it.
+
+    Without a send deadline the first ``sendall`` after the socket buffer
+    fills blocks forever while holding the write lock, and ``stop()`` — which
+    itself sends a control line — never returns.
+    """
+    monkeypatch.setenv("FAKE_DEAF", "1")
+    client = make_client()
+    try:
+        client.start(5.0)
+        # fill the socket buffer: 4 MiB cannot fit, and the child reads none
+        # of it, so the write deadline is what ends the call.
+        big = "x" * (4 * 1024 * 1024)
+        with pytest.raises(TimeoutError):
+            client.request("add", 1.0, stream={"index": 0, "id": "cam-0",
+                                               "url": big})
+        assert client.proc.poll() is None        # the child is still alive
+
+        done = []
+        t = threading.Thread(target=lambda: (client.stop(timeout_s=1.0),
+                                             done.append(True)))
+        t.daemon = True
+        t.start()
+        t.join(timeout=20.0)
+        assert done, "stop() did not return: a blocked send still owns the lock"
+        assert client.proc.poll() is not None    # child reclaimed
+    finally:
+        client.kill()

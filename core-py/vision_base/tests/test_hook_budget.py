@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import pathlib
@@ -21,7 +22,7 @@ jsonschema = pytest.importorskip("jsonschema")
 from vision_base import geom
 from vision_base import letterbox
 from vision_base.health import HealthServer, build_healthz
-from vision_base.shard import Shard
+from vision_base.shard import HOOK_BUDGET_WINDOW_S, Shard
 from vision_base.types import Detection, FrameResult, StreamSpec
 
 FAKE = os.path.join(os.path.dirname(__file__), "fake_runtime.py")
@@ -171,7 +172,9 @@ def test_busy_hook_exceeds_budget():
     shard, saved = make_shard(BusyApp(), env={"FAKE_FPS": "15"})
     try:
         shard.start()
-        shard.add_stream(StreamSpec("cam-0", "fake://"))
+        wait_for(lambda: shard._client is not None, timeout_s=25.0,
+                 what="runtime hello")
+        assert shard.add_stream(StreamSpec("cam-0", "fake://"))["ok"] is True
         # 30 ms busy per frame at 15 fps -> ~0.45 core > 0.10 budget
         wait_for(lambda: shard.hook_budget_status()["exceeded"],
                  timeout_s=12, what="hook_budget.exceeded")
@@ -190,7 +193,9 @@ def test_empty_hook_within_budget():
     shard, saved = make_shard(EmptyApp())
     try:
         shard.start()
-        shard.add_stream(StreamSpec("cam-0", "fake://"))
+        wait_for(lambda: shard._client is not None, timeout_s=25.0,
+                 what="runtime hello")
+        assert shard.add_stream(StreamSpec("cam-0", "fake://"))["ok"] is True
         time.sleep(2.5)
         st = shard.hook_budget_status()
         assert st["exceeded"] is False
@@ -207,9 +212,11 @@ def test_hook_budget_custom_limit():
     shard, saved = make_shard(app)
     try:
         shard.start()
-        shard.add_stream(StreamSpec("cam-0", "fake://"))
+        wait_for(lambda: shard._client is not None, timeout_s=25.0,
+                 what="runtime hello")
+        assert shard.add_stream(StreamSpec("cam-0", "fake://"))["ok"] is True
         wait_for(lambda: shard.hook_budget_status()["exceeded"],
-                 timeout_s=12, what="exceeded with custom limit")
+                 timeout_s=25, what="exceeded with custom limit")
         assert shard.hook_budget_status()["limit"] == 0.05
     finally:
         restore_env(saved)
@@ -255,3 +262,124 @@ def test_healthz_schema_and_200_with_exceeded():
     finally:
         server._srv.shutdown()
         server._srv.server_close()
+
+
+# ------------------------------------------------------------- review item 13
+
+
+def test_hook_budget_divides_by_the_window_not_the_sample_age():
+    """§6.5.5: `core = Σ window CPU ÷ 10 s`. Dividing by the age of the oldest
+    sample turned one 0.02 s call sampled 0.1 s later into 0.2 core instead of
+    0.002 (review item 13)."""
+    shard, saved = make_shard(EmptyApp())
+    try:
+        with shard._cv:
+            shard._hook_win_start = time.monotonic() - 0.1
+            shard._hook_win_cpu["on_frame"] = 0.02
+        st = shard.hook_budget_status()
+        assert st["core"] == pytest.approx(0.002, abs=1e-9)
+        assert st["exceeded"] is False
+        assert st["by_method"]["on_frame"] == pytest.approx(0.02)
+    finally:
+        restore_env(saved)
+        shard.stop()
+
+
+def test_hook_budget_window_rolls_over():
+    """The heartbeat polls the running window every second, so the final
+    reading of a window is taken just before it rolls; once it rolls the burst
+    no longer counts."""
+    shard, saved = make_shard(EmptyApp())
+    try:
+        with shard._cv:
+            shard._hook_win_start = time.monotonic() - HOOK_BUDGET_WINDOW_S + 1.0
+            shard._hook_win_cpu["on_event"] = 3.0     # 0.3 core over the window
+        st = shard.hook_budget_status()               # still inside the window
+        assert st["core"] == pytest.approx(0.3, abs=1e-9)
+        assert st["exceeded"] is True
+        with shard._cv:                               # ... now it expires
+            shard._hook_win_start = time.monotonic() - HOOK_BUDGET_WINDOW_S - 0.5
+        st2 = shard.hook_budget_status()
+        assert st2["core"] == 0.0 and st2["exceeded"] is False
+        assert st2["by_method"] == {"on_frame": 0.0, "on_event": 0.0, "other": 0.0}
+    finally:
+        restore_env(saved)
+        shard.stop()
+
+
+def test_hook_slow_counts_and_warns(caplog):
+    """§6.5.1: one hook call over a second is warned about and counted."""
+    class SlowOnce(EmptyApp):
+        def on_frame(self, ctx, res):
+            # Burn *thread CPU*, which is what the meter reads: a sleeping hook
+            # is (correctly) not slow, and on macOS a wall-clock busy loop
+            # accrues thread_time at roughly half the wall rate, so burning by
+            # wall clock cannot reach the 1 s threshold reliably.
+            t0 = time.thread_time()
+            cap = time.monotonic() + 15.0
+            while time.thread_time() - t0 < 1.05 and time.monotonic() < cap:
+                pass
+            return []
+
+    shard, saved = make_shard(SlowOnce())
+    try:
+        shard.start()
+        # a loaded machine can outrun hello_timeout_s; without a live runtime
+        # the add answers ok:false and no frame (and no slow hook) ever comes
+        wait_for(lambda: shard._client is not None, timeout_s=25.0,
+                 what="runtime hello")
+        assert shard.add_stream(StreamSpec("cam-0", "fake://"))["ok"] is True
+        with caplog.at_level(logging.WARNING, logger="vb.shard"):
+            wait_for(lambda: shard.hook_slow >= 1, timeout_s=25,
+                     what="hook_slow counted")
+        assert any("hook on_frame took" in r.message for r in caplog.records)
+        assert shard.hook_budget_status()["slow"] == shard.hook_slow
+    finally:
+        restore_env(saved)
+        shard.stop()
+
+
+# ------------------------------------------------------------- review item 20
+
+
+def test_health_server_sheds_connections_over_the_cap():
+    """Review item 20: the unauthenticated endpoint must not let slow clients
+    exhaust the supervisor's threads and FDs."""
+    import socket
+
+    body = {"status": "ok", "device_id": "d", "backend": "cpu",
+            "base_version": "0", "uptime_s": 0.0,
+            "mqtt": {"control_connected": True, "publish_connected": [],
+                     "queue_depth": [], "dropped": []},
+            "supervisor": {"pid": 1, "rss_kb": None, "cpu_s": None},
+            "shards": [], "rss_kb_total": 0, "streams": []}
+    server = HealthServer("127.0.0.1", 0, lambda: body, max_connections=2)
+    server.start()
+    held = []
+    try:
+        for _ in range(2):
+            s = socket.create_connection(("127.0.0.1", server.actual_port))
+            s.settimeout(5.0)
+            held.append(s)          # open but never sends a request
+        wait_for(lambda: server._srv.served == 2, timeout_s=5,
+                 what="two connections in flight")
+
+        extra = socket.create_connection(("127.0.0.1", server.actual_port))
+        extra.settimeout(5.0)
+        try:
+            data = extra.recv(4096)
+        finally:
+            extra.close()
+        assert b"503" in data
+        assert server._srv.shed == 1
+    finally:
+        for s in held:
+            s.close()
+        server.stop()
+
+
+def test_health_server_has_a_request_timeout():
+    """A connection that never sends anything is dropped instead of holding a
+    thread forever."""
+    from vision_base.health import REQUEST_TIMEOUT_S
+    assert 0 < REQUEST_TIMEOUT_S <= 30

@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import OrderedDict
+from urllib.parse import urlsplit, urlunsplit
 
 log = logging.getLogger("vision_base.control")
 
@@ -17,11 +18,46 @@ ACK_SCHEMA_ID = "vb.ack/1"
 COMMANDS = ("add_stream", "remove_stream", "set_threshold", "list_streams")
 STREAM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
-__all__ = ["CommandError", "ControlPlane", "build_ack"]
+# Query parameters whose value is a credential (review item 21). Stream URLs
+# routinely carry RTSP/HTTP credentials, so an ack that echoes the URL back
+# over an unauthenticated MQTT topic hands them to every subscriber.
+SENSITIVE_QUERY_KEYS = frozenset({
+    "password", "passwd", "pwd", "secret", "token", "auth", "authorization",
+    "apikey", "api_key", "access_token", "accesskey", "key", "credential",
+})
+
+__all__ = ["CommandError", "ControlPlane", "build_ack", "redact_url"]
 
 
 class CommandError(Exception):
     """Rejected command; ``str(exc)`` goes into the ack ``error`` field."""
+
+
+def redact_url(url: str) -> str:
+    """Strip credentials from a stream URL before logging or acking it.
+
+    ``rtsp://user:pass@cam/s1?token=abc`` -> ``rtsp://***:***@cam/s1?token=***``.
+    """
+    if not isinstance(url, str) or not url:
+        return url
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<redacted url>"
+    netloc = parts.netloc
+    if "@" in netloc:
+        netloc = "***:***@" + netloc.rsplit("@", 1)[1]
+    query = parts.query
+    if query:
+        # Only the sensitive values are rewritten: re-encoding the whole query
+        # would change how every other parameter reads.
+        kept = []
+        for item in query.split("&"):
+            key, sep, _value = item.partition("=")
+            kept.append(f"{key}=***" if sep
+                        and key.lower() in SENSITIVE_QUERY_KEYS else item)
+        query = "&".join(kept)
+    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
 
 
 def build_ack(now_ms: int, session_id: str, device_id: str, request_id: str,
@@ -82,7 +118,13 @@ class ControlPlane:
             return None
         request_id = req.get("request_id")
         if not request_id or not isinstance(request_id, str):
-            log.warning("cmd/control without request_id: %r", req)
+            # Never log the whole request: add_stream params carry the stream
+            # URL, credentials included (review item 21).
+            log.warning("cmd/control without request_id "
+                        "(device_id=%r command=%r params=%r)",
+                        req.get("device_id"), req.get("command"),
+                        sorted((req.get("params") or {}).keys())
+                        if isinstance(req.get("params"), dict) else None)
             return None
         command = req.get("command")
 

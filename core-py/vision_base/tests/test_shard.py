@@ -6,6 +6,7 @@ runs against the real vb-runtime + synthetic backend via VB_RUNTIME_BIN.
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import threading
 import time
@@ -123,6 +124,7 @@ class SlowFrameApp:
         return []
 
 
+
 def wait_for(predicate, timeout_s=6.0, what="condition"):
     deadline = time.time() + timeout_s
     while time.time() < deadline:
@@ -130,6 +132,14 @@ def wait_for(predicate, timeout_s=6.0, what="condition"):
             return True
         time.sleep(0.05)
     raise AssertionError(f"timeout waiting for {what}")
+
+
+def start_ready(shard, timeout_s=25.0):
+    """start() + wait for hello: a loaded machine can outrun hello_timeout_s,
+    after which add_stream answers ok:false instead of raising."""
+    shard.start()
+    wait_for(lambda: shard._client is not None, timeout_s=timeout_s,
+             what="runtime hello")
 
 
 def make_shard(app, publisher, *, env=None, backoff=0.3, argv=None):
@@ -382,3 +392,177 @@ def test_repeated_state_delivered_once():
     finally:
         cleanup_env(old)
         shard.stop()
+
+
+# ------------------------------------------------------------- review items
+
+
+def test_replay_continues_after_one_failed_add(tmp_path):
+    """Review item 2: one rejected `add` during the restart replay must not
+    abandon the remaining streams (§6.9 rule 2 replays in index order)."""
+    marker = tmp_path / "reject"
+    app = RecordingApp(snapshot=False)
+    pub = FakePublisher()
+    shard, old = make_shard(app, pub, env={"FAKE_FPS": "10",
+                                           "FAKE_REJECT_STREAM": "cam-0",
+                                           "FAKE_REJECT_FILE": str(marker)},
+                            backoff=0.3)
+    try:
+        start_ready(shard)
+        assert shard.add_stream(StreamSpec("cam-0", "fake://"))["ok"] is True
+        assert shard.add_stream(StreamSpec("cam-1", "fake://"))["ok"] is True
+        wait_for(lambda: ("cam-0", "running") in app.states)
+        wait_for(lambda: ("cam-1", "running") in app.states)
+        marker.write_text("x")              # from now on cam-0 is rejected
+        os.kill(shard._client.pid, signal.SIGKILL)
+        wait_for(lambda: ("cam-0", "error") in app.states, timeout_s=15,
+                 what="failed replay reported")
+        # cam-0 is index 0, so cam-1 is only re-added if the loop continued
+        wait_for(lambda: sum(1 for s in app.states
+                             if s == ("cam-1", "running")) >= 2,
+                 timeout_s=15, what="cam-1 replayed after cam-0 failed")
+    finally:
+        cleanup_env(old)
+        shard.stop()
+
+
+def test_configure_analyzer_keeps_the_rest_of_the_set():
+    """Review item 5: reconfiguring one analyzer must not drop the others from
+    the set replayed after a vb-runtime restart (§6.5.3)."""
+    class TwoAnalyzerApp:
+        name, wants_frames = "two", False
+        def analyzers(self, spec):
+            return [{"name": "line_cross", "config": {"a": 1}},
+                    {"name": "zone", "config": {"b": 2}}]
+
+    class FakeRuntime:
+        def request(self, op, timeout_s, **fields):
+            return {"ok": True, "applied": {"name": fields["name"]}}
+
+    from vision_base.hooks import StreamContext
+    app = TwoAnalyzerApp()
+    ctx = StreamContext(0, StreamSpec("cam-0", "fake://"), FakeRuntime())
+    base = [{"name": "line_cross", "config": {"a": 1}},
+            {"name": "zone", "config": {"b": 2}}]
+    assert ctx.analyzer_configs(app) == base
+    ctx.configure_analyzer("zone", {"b": 9})
+    assert ctx.analyzer_configs(app) == [
+        {"name": "line_cross", "config": {"a": 1}},
+        {"name": "zone", "config": {"b": 9}}]
+    ctx.configure_analyzer("dwell", {"t": 1.0})     # not in analyzers(spec)
+    assert [a["name"] for a in ctx.analyzer_configs(app)] == \
+        ["line_cross", "zone", "dwell"]
+
+
+def test_set_threshold_survives_runtime_restart():
+    """Review item 6: an applied threshold must be what the shard keeps and
+    replays, not the value it was created with."""
+    app = RecordingApp(snapshot=False)
+    pub = FakePublisher()
+    shard, old = make_shard(app, pub, env={"FAKE_FPS": "10"}, backoff=0.3)
+    try:
+        start_ready(shard)
+        shard.add_stream(StreamSpec("cam-0", "fake://", score_threshold=0.3))
+        wait_for(lambda: ("cam-0", "running") in app.states)
+        shard.set_threshold("cam-0", 0.9)
+        assert shard.status_streams()[0]["score_threshold"] == 0.9
+
+        replayed = []
+        orig = shard._send_add
+        def spy(client, ctx, *, first):
+            replayed.append(ctx.spec.score_threshold)
+            return orig(client, ctx, first=first)
+        shard._send_add = spy
+        os.kill(shard._client.pid, signal.SIGKILL)
+        wait_for(lambda: 0.9 in replayed, timeout_s=15,
+                 what="replayed add carries the new threshold")
+    finally:
+        cleanup_env(old)
+        shard.stop()
+
+
+def test_failed_add_releases_the_stream_id():
+    """Review item 7: a rejected add must roll its registration back instead of
+    reserving the stream_id forever."""
+    app = RecordingApp(snapshot=False)
+    pub = FakePublisher()
+    shard, old = make_shard(app, pub, env={"FAKE_REJECT_STREAM": "cam-0"})
+    try:
+        start_ready(shard)
+        with pytest.raises(Exception) as first:
+            shard.add_stream(StreamSpec("cam-0", "fake://"))
+        assert "duplicate" not in str(first.value).lower()
+        assert "cam-0" not in shard._by_stream_id
+        # the second attempt reaches the native side again (and is rejected
+        # there), rather than failing locally as a duplicate stream_id
+        with pytest.raises(Exception) as second:
+            shard.add_stream(StreamSpec("cam-0", "fake://"))
+        assert "duplicate" not in str(second.value).lower()
+        assert shard.stream_status() == []
+    finally:
+        cleanup_env(old)
+        shard.stop()
+
+
+def test_remove_stream_releases_the_stream_id_and_context():
+    """Review item 7: after on_stream_removed the mapping and the context are
+    released, so the same stream_id can be added again."""
+    app = RecordingApp(snapshot=False)
+    pub = FakePublisher()
+    shard, old = make_shard(app, pub, env={"FAKE_FPS": "10"})
+    try:
+        start_ready(shard)
+        assert shard.add_stream(StreamSpec("cam-0", "fake://"))["ok"] is True
+        wait_for(lambda: ("cam-0", "running") in app.states)
+        old_idx = shard._by_stream_id["cam-0"]
+        shard.remove_stream("cam-0")
+        wait_for(lambda: app.removed == ["cam-0"], what="on_stream_removed")
+        wait_for(lambda: old_idx not in shard.contexts, what="context released")
+        assert "cam-0" not in shard._by_stream_id
+        assert shard.add_stream(StreamSpec("cam-0", "fake://"))["ok"] is True
+    finally:
+        cleanup_env(old)
+        shard.stop()
+
+
+def test_stop_while_runtime_is_starting_reclaims_the_child():
+    """Review item 11: stop() during the hello wait must not leave a runtime
+    behind, and the start path must not install it afterwards."""
+    app = RecordingApp(snapshot=False)
+    pub = FakePublisher()
+    shard, old = make_shard(app, pub, env={"FAKE_NO_HELLO": "1"})
+    try:
+        t = threading.Thread(target=shard.start, daemon=True)
+        t.start()
+        wait_for(lambda: shard._starting is not None, what="start in flight")
+        child = shard._starting.proc
+        assert child.poll() is None
+
+        t0 = time.monotonic()
+        shard.stop()
+        assert time.monotonic() - t0 < 6.0
+        t.join(6.0)
+        assert not t.is_alive(), "start path did not converge"
+        assert shard._client is None
+        wait_for(lambda: child.poll() is not None, what="child reclaimed")
+    finally:
+        cleanup_env(old)
+        shard.stop()
+
+
+def test_shard_config_write_refuses_a_symlinked_path(tmp_path):
+    """Review item 23: the per-shard runtime config is written through an
+    exclusive temp file and never follows a pre-placed symlink."""
+    state = tmp_path / "shard-0"
+    state.mkdir()
+    victim = tmp_path / "victim.json"
+    victim.write_text("untouched")
+    (state / "rt-0.json").symlink_to(victim)
+
+    shard = Shard(0, EchoApp(), FakePublisher(), runtime_argv=FAKE_ARGV,
+                  runtime_cfg=RT_CFG, state_dir=str(state))
+    with pytest.raises(OSError):
+        shard.start()
+    assert victim.read_text() == "untouched"
+    assert not list(state.glob("*.tmp"))
+

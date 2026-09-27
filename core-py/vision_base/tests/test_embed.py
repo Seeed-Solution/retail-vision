@@ -207,3 +207,46 @@ def test_real_runtime_synthetic(tmp_path):
         items = collect(rt, 20, timeout_s=3.0)
         frames = [i for i in items if isinstance(i, FrameResult)]
         assert len(frames) >= 20
+
+
+# ------------------------------------------------------------- review item 7
+
+
+def test_failed_add_rolls_back_the_stream_id(tmp_path):
+    """Review item 7: a rejected add must not reserve the stream_id."""
+    from vision_base.runtime_client import RuntimeError_
+    saved = set_env(fake_env(FAKE_REJECT_STREAM="cam-x"))
+    rt = make_rt(tmp_path)
+    try:
+        rt.start()
+        with pytest.raises(RuntimeError_) as excinfo:
+            rt.add_stream("cam-x", "fake://1")
+        assert "synthetic rejection" in str(excinfo.value)
+        assert "cam-x" not in rt._contexts
+        # the id is free again: the second attempt reaches the runtime again
+        with pytest.raises(RuntimeError_) as second:
+            rt.add_stream("cam-x", "fake://1")
+        assert "synthetic rejection" in str(second.value)
+        assert "duplicate" not in str(second.value)
+    finally:
+        rt.stop()
+        restore_env(saved)
+
+
+def test_remove_stream_releases_the_mapping(tmp_path):
+    """Review item 7: a successful remove frees the stream_id and its index."""
+    saved = set_env(fake_env(FAKE_FPS="20"))
+    rt = make_rt(tmp_path)
+    try:
+        rt.start()
+        rt.add_stream("cam-0", "fake://0")
+        idx = rt._contexts["cam-0"]
+        rt.remove_stream("cam-0")
+        assert "cam-0" not in rt._contexts
+        assert idx not in rt._ids and idx not in rt._analyzers
+        # re-adding the same stream_id works (a new index is allocated)
+        rt.add_stream("cam-0", "fake://0")
+        assert rt._contexts["cam-0"] != idx
+    finally:
+        rt.stop()
+        restore_env(saved)

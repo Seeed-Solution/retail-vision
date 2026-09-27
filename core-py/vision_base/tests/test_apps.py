@@ -25,7 +25,7 @@ from fake_broker import FakeBroker  # noqa: E402
 from vision_base.apps import ConfigApp  # noqa: E402
 from vision_base.config import ConfigError, load  # noqa: E402
 from vision_base.hooks import Outgoing, StreamContext  # noqa: E402
-from vision_base.letterbox import fit  # noqa: E402
+from vision_base.letterbox import fit, to_model_norm, to_source_norm  # noqa: E402
 from vision_base.types import Detection, Event, FrameResult, StreamSpec  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -281,13 +281,99 @@ def test_configapp_vs_standalone_crosscheck(tmp_path):
         assert set(c["fields"]) == set(e["fields"])
         for k in e["fields"]:
             a, b = c["fields"][k], e["fields"][k]
-            if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-                assert abs(a - b) <= 1e-6, f"fields[{k}]: {a} != {b}"
-            elif isinstance(a, list) and isinstance(b, list):
+            # §6.10.2: the two implementations must agree *exactly* — the
+            # earlier 1e-6 tolerance hid a genuine field-path divergence
+            # (§6.10.2 rules 1-3), and a tolerance is not what the spec
+            # requires ("逐字段精确相等，不是近似相等").
+            if isinstance(a, list) and isinstance(b, list):
+                assert len(a) == len(b), f"fields[{k}]: {a} != {b}"
                 for x, y in zip(a, b):
-                    assert abs(x - y) <= 1e-6, f"fields[{k}]: {a} != {b}"
+                    assert x == y, f"fields[{k}]: {a!r} != {b!r}"
             else:
                 assert a == b, f"fields[{k}]: {a!r} != {b!r}"
         if matched >= 10:
             break
     assert matched >= 10, f"only {matched} matched events"
+
+
+# --------------------------------------------- §6.10.2 numeric consistency
+
+def test_rule1_round6_leaves_int_bool_and_str_alone():
+    """§6.10.2 rule 1: `fields` is rounded recursively, but only floats — an
+    integer must not become a float, a bool must not become a number."""
+    app = make_app()
+    ev = Event("s", 1, 1.0, "zone", "zone_enter", 3, fields={
+        "i": 3, "b": True, "s": "x", "f": 0.123456789,
+        "nested": {"i": 4, "f": 1.9999999, "l": [1, 2.5]},
+    })
+    got = app.event_payload(ev)["fields"]
+    assert got == {"i": 3, "b": True, "s": "x", "f": 0.123457,
+                   "nested": {"i": 4, "f": 2.0, "l": [1, 2.5]}}
+    assert isinstance(got["i"], int) and not isinstance(got["i"], bool)
+    assert isinstance(got["b"], bool)
+    assert isinstance(got["s"], str)
+    assert isinstance(got["nested"]["i"], int)
+    assert isinstance(got["nested"]["l"][0], int)
+
+
+def test_rule1_round6_is_six_decimals_not_six_significant_digits():
+    """§6.10.2 rule 1: `round(x, 6)`, not `%.6g` (which diverges outside
+    [0.1, 1) — `inference_ms` was the measured case)."""
+    app = make_app()
+    res = FrameResult(stream_id="s", seq=1, wall_ms=0.0, geom=fit(320, 240, 640, 640),
+                      inference_ms=12.3456789, queue_delay_ms=0.0, detections=[])
+    assert app.frame_payload(res)["inference_ms"] == 12.345679
+    res.inference_ms = 1234.5678901
+    assert app.frame_payload(res)["inference_ms"] == 1234.56789
+
+
+def test_rule3_box_and_keypoints_are_clipped_to_unit_range():
+    """§6.10.2 rule 3: letterbox padding back-computes a full-canvas box out of
+    range; the output must be clamped to [0, 1]."""
+    # 1280x720 into 640x640: scale 0.5, pad_y = (640 - 360)/2 = 140
+    geom = fit(1280, 720, 640, 640)
+    assert geom.pad_y == 140.0
+    app = make_app(frame_every=1)
+    # a box covering the whole model canvas -> source y = [-0.389, 1.389]
+    det = Detection(cx=0.5, cy=0.5, w=1.0, h=1.0, score=0.5, class_id=0,
+                    track_id=1, keypoints=(0.5, 0.0, 0.9, 0.5, 1.0, 0.9))
+    res = FrameResult(stream_id="s", seq=1, wall_ms=0.0, geom=geom,
+                      inference_ms=0.0, queue_delay_ms=0.0, detections=[det])
+    payload = app.frame_payload(res)
+    box = payload["detections"][0]["box"]
+    assert box[0] == 0.0 and box[2] == 1.0
+    assert box[1] == 0.0 and box[3] == 1.0, box       # was -0.389 / 1.389
+    kps = payload["detections"][0]["keypoints"]
+    assert kps[0] == [0.5, 0.0, 0.9]
+    assert kps[1] == [0.5, 1.0, 0.9]
+    for x, y, conf in kps:
+        assert 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0
+    jsonschema.validate(payload, SCHEMAS["vb.frame/1"])
+
+
+def test_rule4_ts_ms_uses_banker_rounding():
+    """§6.10.2 rule 4: half-to-even, as Python's round() does (C++ must use
+    nearbyint, not llround)."""
+    app = make_app()
+    for wall_ms, expect in [(1000.5, 1000), (1001.5, 1002), (1002.5, 1002),
+                            (1790000000123.4, 1790000000123),
+                            (1790000000123.6, 1790000000124)]:
+        ev = Event("s", 1, wall_ms, "zone", "zone_enter", 0, fields={})
+        assert app.event_payload(ev)["ts_ms"] == expect
+        res = FrameResult(stream_id="s", seq=1, wall_ms=wall_ms,
+                          geom=fit(320, 240, 640, 640), inference_ms=0.0,
+                          queue_delay_ms=0.0, detections=[])
+        assert app.frame_payload(res)["ts_ms"] == expect
+
+
+def test_rule2_source_transform_stays_double_precision():
+    """§6.10.2 rule 2: the inverse transform has no float32 round trip — the
+    sixth decimal of a known case must match the double computation."""
+    geom = fit(1920, 1080, 640, 640)
+    sx, sy = to_source_norm(geom, 0.5, 0.5)
+    assert (sx, sy) == (0.5, 0.5)                 # exact for a centred point
+    px = 0.1234567
+    mx, my = to_model_norm(geom, px, 0.7654321)
+    bx, by = to_source_norm(geom, mx, my)
+    # double round trip is exact to well under 1e-12; float32 would land ~1e-8 off
+    assert abs(bx - px) < 1e-12 and abs(by - 0.7654321) < 1e-12

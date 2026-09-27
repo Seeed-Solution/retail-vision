@@ -5,15 +5,23 @@ Holds messages while disconnected and re-sends in order after reconnect;
 when the queue is full the oldest message is dropped and `dropped` counted.
 Process restart loses the queue (applications needing persistence keep their
 own spool and advance its cursor based on ``publish(qos=1)`` return values).
+
+The head of the queue is removed only by a successful send or by ``submit``
+evicting it because the queue is full (§6.7.1: offline messages are kept and
+re-sent in order). A payload that cannot be JSON-encoded is dropped
+individually instead of killing the worker thread.
 """
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from collections import deque
 
 __all__ = ["PublishWorker"]
+
+log = logging.getLogger("vision_base.publish")
 
 
 class PublishWorker(threading.Thread):
@@ -39,7 +47,8 @@ class PublishWorker(threading.Thread):
 
     def stats(self) -> dict:
         with self._cv:
-            return {"queued": len(self._q), "dropped": self.dropped,
+            return {"queued": len(self._q), "queue_depth": len(self._q),
+                    "dropped": self.dropped,
                     "sent": self.sent, "failed": self.failed}
 
     def close(self, timeout_s: float = 3.0) -> None:
@@ -59,6 +68,23 @@ class PublishWorker(threading.Thread):
         except Exception:
             return False
 
+    def _encode(self, topic: str, payload):
+        """Encode one payload; ``None`` means "drop this message".
+
+        A payload that is not JSON-serializable is isolated here (report item
+        3): raising out of the worker loop used to kill the thread for good,
+        after which every later message was silently lost.
+        """
+        if isinstance(payload, (bytes, str)):
+            return payload
+        try:
+            return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        except Exception:               # noqa: BLE001 - one message, not the loop
+            self.failed += 1
+            log.warning("dropping unserializable publish payload for %r",
+                        topic, exc_info=True)
+            return None
+
     def run(self) -> None:
         # Consecutive-failure backoff (1, 2, 4 ... <= 30 s), reset on any success.
         backoff_s = 0.0
@@ -70,25 +96,25 @@ class PublishWorker(threading.Thread):
                     break
                 item = self._q[0]
             topic, payload, qos, retain = item
-            if isinstance(payload, (bytes, str)):
-                data = payload
-            else:
-                data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+            data = self._encode(topic, payload)
+            if data is None:
+                self._pop_if_head(item)     # unencodable: drop just this one
+                continue
             if self._send(topic, data, qos, retain):
                 self.sent += 1
                 backoff_s = 0.0
                 self._pop_if_head(item)
                 continue
-            # First failure: the client reconnects on its own schedule; wait our
-            # backoff, retry this head message once, then drop it either way.
+            # Offline (or a failed QoS1 send): the head stays queued. The
+            # client reconnects on its own schedule and we retry it, in order,
+            # until it goes out — `submit` is the only thing that may evict a
+            # message while offline (§6.7.1, report item 9: the previous
+            # "retry once then drop" silently lost messages whenever the
+            # outage outlived one backoff interval).
+            self.failed += 1
             backoff_s = min(30.0, backoff_s * 2) if backoff_s else 1.0
             if self._stop.wait(backoff_s):
                 break
-            if self._send(topic, data, qos, retain):
-                self.sent += 1
-                backoff_s = 0.0
-            else:
-                self.failed += 1
-            # submit() may have dropped this item while we waited (queue full);
-            # only remove it if it is still the head.
-            self._pop_if_head(item)
+            # `submit` may have evicted this head while we waited (queue full);
+            # the loop re-reads `self._q[0]` so the next attempt targets
+            # whatever is at the head now.

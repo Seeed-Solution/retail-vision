@@ -117,18 +117,32 @@ class Runtime:
         analyzer_list = analyzers if analyzers is not None \
             else opts.get("analyzers", [])
         idx = self._next_index
-        self._next_index += 1
+        self._next_index += 1        # never reused, even if the add fails
         self._contexts[stream_id] = idx
         self._ids[idx] = stream_id
         self._analyzers[idx] = list(analyzer_list)
-        reply = client.request("add", timeout_s,
-                               stream={"index": idx, "id": stream_id,
-                                       "url": url, "name": name,
-                                       "transport": transport,
-                                       "score_threshold": score_threshold,
-                                       "options": opts},
-                               analyzers=analyzer_list)
+        try:
+            reply = client.request("add", timeout_s,
+                                   stream={"index": idx, "id": stream_id,
+                                           "url": url, "name": name,
+                                           "transport": transport,
+                                           "score_threshold": score_threshold,
+                                           "options": opts},
+                                   analyzers=analyzer_list)
+        except BaseException:
+            # A failed add must not reserve the stream_id forever (report
+            # item 7): roll the registration back before re-raising.
+            self._forget(stream_id)
+            raise
         return reply.get("applied", reply)
+
+    def _forget(self, stream_id: str) -> None:
+        """Drop the host-side mapping for one stream (no control line)."""
+        idx = self._contexts.pop(stream_id, None)
+        if idx is None:
+            return
+        self._ids.pop(idx, None)
+        self._analyzers.pop(idx, None)
 
     def remove_stream(self, stream_id: str, timeout_s: float = 5.0) -> None:
         client = self._require_client()
@@ -136,6 +150,9 @@ class Runtime:
         if idx is None:
             raise KeyError(f"unknown stream {stream_id!r}")
         client.request("remove", timeout_s, stream_index=idx)
+        # Only a successful remove releases the mapping (report item 7); a
+        # raised request leaves it in place so the caller can retry.
+        self._forget(stream_id)
 
     def configure_analyzer(self, stream_id: str, name: str, config: dict,
                            timeout_s: float = 3.0) -> dict:

@@ -18,9 +18,9 @@ import sys
 import threading
 import time
 
-from . import __version__, procstat
-from .config import BaseConfig, runtime_config
-from .control import CommandError, ControlPlane
+from . import __version__, atomicio, procstat
+from .config import BaseConfig, merge_plugins, runtime_config
+from .control import CommandError, ControlPlane, redact_url
 from .health import HealthServer, build_healthz
 from .hooks import AppHooks
 from .mqtt import MqttClient, Will
@@ -31,6 +31,33 @@ from .types import StreamSpec
 log = logging.getLogger("vision_base.supervisor")
 
 __all__ = ["Supervisor", "load_app"]
+
+# §6.5.4: the heartbeat carries the app's `health()` result verbatim, but the
+# result must be a JSON-serializable dict of at most 4096 bytes — anything
+# else would break the IPC frame and kill the heartbeat thread.
+APP_HEALTH_MAX_BYTES = 4096
+APP_HEALTH_INVALID = {"error": "app health invalid"}
+
+# §6.7 `R/cmd/control` queue bounds (review item 22): the payload used to be
+# appended to an unbounded list from the MQTT callback thread before any
+# validation, so a broker feeding commands faster than they are handled grew
+# the supervisor without limit.
+CMD_QUEUE_MAX_MESSAGES = 64
+CMD_QUEUE_MAX_BYTES = 256 * 1024
+CMD_MESSAGE_MAX_BYTES = 64 * 1024
+
+
+def validate_app_health(value):
+    """§6.5.4 isolation: return a dict that is safe to put on the heartbeat."""
+    if not isinstance(value, dict):
+        return dict(APP_HEALTH_INVALID)
+    try:
+        blob = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    except Exception:                       # noqa: BLE001 - any payload
+        return dict(APP_HEALTH_INVALID)
+    if len(blob.encode("utf-8")) > APP_HEALTH_MAX_BYTES:
+        return dict(APP_HEALTH_INVALID)
+    return value
 
 
 # ----------------------------------------------------------------- app loader
@@ -55,9 +82,11 @@ def _jsonb(obj) -> bytes:
 
 
 def _shard_send(conn, obj: dict) -> None:
+    # Broad on purpose: a payload that cannot be pickled would otherwise
+    # propagate out of the caller and kill the heartbeat thread (item 14).
     try:
         conn.send(obj)
-    except (OSError, ValueError, BrokenPipeError):
+    except Exception:                       # noqa: BLE001
         pass
 
 
@@ -129,7 +158,7 @@ class ShardWorker:
                 health_fn = getattr(app, "health", None)
                 if callable(health_fn):
                     try:
-                        hb["app"] = health_fn()
+                        hb["app"] = validate_app_health(health_fn())
                     except Exception as exc:
                         hb["app"] = {"error": f"{type(exc).__name__}: {exc}"}
                 _shard_send(conn, hb)
@@ -150,8 +179,12 @@ class ShardWorker:
                     break
                 try:
                     if op == "add":
-                        shard.add_stream(StreamSpec(**msg["stream"]))
-                        reply = {"ok": True}
+                        # shard.add_stream returns ok:false while the runtime
+                        # is restarting; that verdict must reach the ack
+                        # instead of a hard-coded success (report item 8).
+                        added = shard.add_stream(StreamSpec(**msg["stream"]))
+                        reply = {"ok": bool(added.get("ok")),
+                                 "error": str(added.get("error", ""))}
                     elif op == "remove":
                         shard.remove_stream(msg["stream_id"])
                         reply = {"ok": True}
@@ -189,6 +222,8 @@ class _ShardHandle:
         self.streams: list[dict] = []       # authoritative stream dicts
         self.in_process = False
         self.restarting = False
+        self.t0 = time.monotonic()  # spawn time: startup supervision (item 1)
+        self.started = threading.Event()    # first `started`/heartbeat seen
 
 
 class Supervisor:
@@ -198,10 +233,17 @@ class Supervisor:
     def __init__(self, cfg: BaseConfig, *, runtime_argv: list[str] | None = None,
                  heartbeat_timeout_s: float = 5.0):
         self.cfg = cfg
+        # §6.5 / report item 15: the application's plugins() joins
+        # analyzers.plugins *before* any runtime config is generated.
+        cfg.analyzers["plugins"] = merge_plugins(
+            cfg.analyzers.get("plugins", []), self._load_app_plugins())
         self.workers = cfg.runtime["workers"]
         self.per_worker = cfg.runtime["max_streams_per_worker"]
         self.backoff_s = float(cfg.runtime["restart_backoff_s"])
         self.heartbeat_timeout_s = heartbeat_timeout_s
+        # A shard that never sends its first heartbeat is supervised too
+        # (report item 1); give startup the same slack the old code allowed.
+        self._startup_timeout_s = max(heartbeat_timeout_s, 15.0)
         self.state_dir = cfg.state_dir
         self.topic_root = cfg.mqtt["topic_root"].rstrip("/")
         self.client_id = cfg.mqtt.get("client_id") or cfg.device_id
@@ -215,7 +257,6 @@ class Supervisor:
         self._pending: dict[str, dict] = {}
         self._req_counter = 0
         self._control: MqttClient | None = None
-        self._control_ok = False
         self._plane = ControlPlane(cfg.device_id)
         self._plane_ops = _ControlOps(self)
         self._health: HealthServer | None = None
@@ -224,11 +265,41 @@ class Supervisor:
         self._watchdog = threading.Thread(target=self._watchdog_loop,
                                           name="vb-watchdog", daemon=True)
         self._cmd_q: list[bytes] = []
+        self._cmd_q_bytes = 0
+        self._cmd_dropped = 0
         self._cmd_cv = threading.Condition()
         self._stop = threading.Event()
         self._t0 = time.monotonic()
 
     # ---------------------------------------------------------------- helpers
+
+    def _load_app_plugins(self) -> list[str]:
+        """Instantiate the app just far enough to read ``plugins()`` (§6.5).
+
+        The runtime config written for each vb-runtime child is generated in
+        the supervisor, so the supervisor is where the app's plugin list has
+        to be known; the shard processes instantiate their own app instance
+        for the hooks themselves.
+        """
+        module = self.cfg.app.get("module", "")
+        if not module:
+            return []
+        config_dir = os.path.dirname(os.path.abspath(self.cfg.source_path)) \
+            if self.cfg.source_path else ""
+        try:
+            app = load_app(module, config_dir)
+        except Exception:                   # noqa: BLE001
+            log.warning("could not instantiate app %s to read plugins(); "
+                        "using analyzers.plugins only", module, exc_info=True)
+            return []
+        fn = getattr(app, "plugins", None)
+        if not callable(fn):
+            return []
+        try:
+            return list(fn())
+        except Exception:                   # noqa: BLE001
+            log.warning("app %s plugins() failed", module, exc_info=True)
+            return []
 
     def _shard_count_for(self, n_streams: int) -> int:
         if self.per_worker <= 0:
@@ -267,6 +338,7 @@ class Supervisor:
 
     def _spawn_shard(self, index: int, streams: list[dict]) -> _ShardHandle:
         handle = _ShardHandle(index)
+        handle.t0 = time.monotonic()
         handle.streams = [dict(s) for s in streams]
         parent, child = multiprocessing.get_context("spawn").Pipe(duplex=True)
         args = self._shard_args(index, handle.streams)
@@ -301,6 +373,7 @@ class Supervisor:
                     handle.last_hb = time.monotonic()
                     handle.hb = msg
                     handle.alive = True
+                    handle.started.set()
                     hl = msg.get("hello")
                     if hl and not self.hello:
                         self.hello = dict(hl)
@@ -336,14 +409,24 @@ class Supervisor:
             for handle in list(self.shards):
                 if handle.restarting:
                     continue
-                exited = (not handle.in_process
-                          and handle.proc is not None
-                          and handle.proc.exitcode is not None)
-                timed_out = now - handle.last_hb > self.heartbeat_timeout_s
+                if handle.in_process:
+                    # A shard thread has no `exitcode`: without is_alive() a
+                    # workers=1 shard that dies before its first heartbeat was
+                    # never noticed (report item 1).
+                    exited = handle.proc is not None and not handle.proc.is_alive()
+                else:
+                    exited = (handle.proc is not None
+                              and handle.proc.exitcode is not None)
                 if handle.last_hb == 0.0:
-                    timed_out = now - self._t0 > max(self.heartbeat_timeout_s, 15.0)
-                if exited or (handle.alive and timed_out):
+                    # still starting: supervise the startup itself, measured
+                    # from this instance's spawn rather than the supervisor's
+                    stalled = now - handle.t0 > self._startup_timeout_s
+                else:
+                    stalled = now - handle.last_hb > self.heartbeat_timeout_s
+                if exited or stalled:
                     with self._mu:
+                        if self._stop.is_set() or handle.restarting:
+                            continue
                         handle.alive = False
                         handle.restarts += 1
                         handle.restarting = True
@@ -354,28 +437,58 @@ class Supervisor:
                     threading.Thread(target=self._restart_shard,
                                      args=(handle,), daemon=True).start()
 
-    def _restart_shard(self, handle: _ShardHandle) -> None:
-        streams = list(handle.streams)
+    def _reclaim_shard(self, handle: _ShardHandle) -> None:
+        """Terminate a dead instance before its index is reused (item 10).
+
+        The old code spawned the replacement without ever reaping the
+        previous shard or its vb-runtime child, so every restart leaked two
+        processes.
+        """
         if handle.in_process:
             try:
                 handle.conn.send({"op": "stop"})
             except Exception:
                 pass
-        time.sleep(self.backoff_s)
-        with self._mu:
-            old_conn = handle.conn
+            if handle.proc is not None:
+                handle.proc.join(timeout=3.0)
+        else:
+            proc = handle.proc
+            if proc is not None:
+                if proc.is_alive():
+                    proc.terminate()
+                try:
+                    proc.join(timeout=2.0)
+                except Exception:
+                    pass
+                if proc.is_alive():
+                    proc.kill()
+                    try:
+                        proc.join(timeout=2.0)
+                    except Exception:
+                        pass
         try:
-            old_conn.close()
+            handle.conn.close()
         except Exception:
             pass
-        new = self._spawn_shard(handle.index, streams)
-        new.restarts = handle.restarts      # restart count survives respawns
+
+    def _restart_shard(self, handle: _ShardHandle) -> None:
+        self._reclaim_shard(handle)
+        if self._stop.wait(self.backoff_s):
+            return                          # stop() during the backoff (item 10)
         with self._mu:
+            if self._stop.is_set():
+                return
             try:
                 pos = self.shards.index(handle)
-                self.shards[pos] = new     # reader thread updates `new`
             except ValueError:
-                self.shards.append(new)
+                return                      # superseded: nothing to replace
+            # Re-read the stream list at commit time, under the same lock the
+            # control ops mutate it with: a remove_stream that landed while we
+            # backed off must not be undone by a stale snapshot (item 12).
+            streams = [dict(s) for s in handle.streams]
+            new = self._spawn_shard(handle.index, streams)
+            new.restarts = handle.restarts  # restart count survives respawns
+            self.shards[pos] = new          # reader thread updates `new`
         self._publish_status()
 
     # ------------------------------------------------------------ control ops
@@ -409,11 +522,27 @@ class Supervisor:
                 raise CommandError(f"workers limit {self.workers} reached")
             index = len(self.shards)
             with self._mu:
-                handle = self._spawn_shard(index, [stream])
+                handle = self._spawn_shard(index, [])
                 self.shards.append(handle)
+            # Wait for the new shard's real add verdict before committing the
+            # configuration: a spawned shard whose stream could not be opened
+            # used to be reported as a success (report item 8).
+            try:
+                self._await_shard_started(handle)
+                reply = self._send_op(handle, {"op": "add", "stream": stream},
+                                      self.cfg.runtime["open_timeout_s"])
+            except Exception as exc:        # noqa: BLE001
+                self._discard_shard(handle, str(exc))
+                raise CommandError(f"add failed: {exc}") from exc
+            if not reply.get("ok"):
+                self._discard_shard(handle, str(reply.get("error", "")))
+                raise CommandError(str(reply.get("error", "add failed")))
+            with self._mu:
+                handle.streams.append(stream)
             persisted = self._persist_streams()
             self._publish_status()
-            return {"stream_id": stream["stream_id"], "url": stream["url"],
+            return {"stream_id": stream["stream_id"],
+                    "url": redact_url(stream["url"]),
                     "shard": index,
                     "score_threshold": stream["score_threshold"],
                     "persisted": persisted}
@@ -425,9 +554,30 @@ class Supervisor:
             handle.streams.append(stream)
         persisted = self._persist_streams()
         self._publish_status()
-        return {"stream_id": stream["stream_id"], "url": stream["url"],
-                "shard": handle.index, "score_threshold": stream["score_threshold"],
+        # The ack leaves the device over an unauthenticated topic, so the URL
+        # is echoed with its credentials masked (report item 21).
+        return {"stream_id": stream["stream_id"],
+                "url": redact_url(stream["url"]),
+                "shard": handle.index,
+                "score_threshold": stream["score_threshold"],
                 "persisted": persisted}
+
+    def _await_shard_started(self, handle: _ShardHandle) -> None:
+        timeout = (float(self.cfg.native["hello_timeout_s"])
+                   + float(self.cfg.runtime["open_timeout_s"]) + 5.0)
+        if not handle.started.wait(timeout):
+            raise TimeoutError("shard did not start")
+
+    def _discard_shard(self, handle: _ShardHandle, reason: str) -> None:
+        """Roll back a spawn whose first add failed (report item 8)."""
+        log.warning("shard %d discarded after failed add: %s",
+                    handle.index, reason)
+        with self._mu:
+            try:
+                self.shards.remove(handle)
+            except ValueError:
+                pass
+        self._reclaim_shard(handle)
 
     def ops_remove_stream(self, params: dict) -> dict:
         sid = params["stream_id"]
@@ -473,10 +623,9 @@ class Supervisor:
             return False
         with self._mu:
             streams = [s for h in self.shards for s in h.streams]
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(streams, f)
-        os.replace(tmp, path)
+        # Exclusive random temp file in the target directory, and no writing
+        # through a symlink (report item 23).
+        atomicio.write_json_atomic(path, streams)
         return True
 
     def _all_stream_status(self) -> list[dict]:
@@ -554,11 +703,14 @@ class Supervisor:
                 "hook_budget": hb.get("hook_budget"),
             })
         hello = self.hello or {}
+        control = self._control
         return build_healthz(
             device_id=self.cfg.device_id,
             backend=hello.get("backend", self.cfg.backend.get("name", "")),
             uptime_s=time.monotonic() - self._t0,
-            control_connected=self._control_ok,
+            # Live session state, not the value sampled at start() (item 16):
+            # a control session that dropped later used to keep reporting ok.
+            control_connected=bool(control is not None and control.connected),
             supervisor_pid=os.getpid(), shards=shards_body,
             streams=self._all_stream_status())
 
@@ -576,8 +728,26 @@ class Supervisor:
     def _on_control_message(self, topic: str, payload: bytes, retain: bool) -> None:
         if retain:
             return
+        if not isinstance(payload, (bytes, bytearray)):
+            return
+        # Cheap shape check before the payload takes a queue slot; the full
+        # schema check happens in ControlPlane.handle (report item 22).
+        if not payload or len(payload) > CMD_MESSAGE_MAX_BYTES \
+                or payload.lstrip()[:1] != b"{":
+            self._cmd_dropped += 1
+            log.warning("dropping control message: %d bytes, not a JSON object",
+                        len(payload))
+            return
         with self._cmd_cv:
-            self._cmd_q.append(payload)
+            if (len(self._cmd_q) >= CMD_QUEUE_MAX_MESSAGES
+                    or self._cmd_q_bytes + len(payload) > CMD_QUEUE_MAX_BYTES):
+                self._cmd_dropped += 1
+                log.warning("control queue full (%d messages, %d bytes); "
+                            "dropping message", len(self._cmd_q),
+                            self._cmd_q_bytes)
+                return
+            self._cmd_q.append(bytes(payload))
+            self._cmd_q_bytes += len(payload)
             self._cmd_cv.notify_all()
 
     def _cmd_loop(self) -> None:
@@ -588,6 +758,7 @@ class Supervisor:
                 if self._stop.is_set():
                     return
                 raw = self._cmd_q.pop(0)
+                self._cmd_q_bytes = max(0, self._cmd_q_bytes - len(raw))
             try:
                 req = json.loads(raw.decode("utf-8"))
             except (ValueError, UnicodeDecodeError):
@@ -605,7 +776,8 @@ class Supervisor:
     # -------------------------------------------------------------- lifecycle
 
     def start(self) -> None:
-        os.makedirs(self.state_dir, exist_ok=True)
+        # owner-only service directory (report item 23)
+        atomicio.ensure_private_dir(self.state_dir, tighten=True)
         mqtt = self.cfg.mqtt
         self._control = MqttClient(
             mqtt["host"], mqtt["port"], client_id=f"{self.client_id}-ctl",
@@ -615,7 +787,6 @@ class Supervisor:
             will=Will(f"{self.topic_root}/status", self._offline_payload(),
                       qos=1, retain=True))
         self._control.connect(timeout_s=10.0)
-        self._control_ok = self._control.connected
         self._control.subscribe(f"{self.topic_root}/cmd/control", 1,
                                 self._on_control_message)
         threading.Thread(target=self._cmd_loop, name="vb-cmd",
@@ -632,7 +803,9 @@ class Supervisor:
                 handle = self._spawn_shard(i, streams)
                 self.shards.append(handle)
 
-        self._health = HealthServer(self.cfg.health.get("host", "0.0.0.0"),
+        # Loopback unless the configuration says otherwise (item 20): the
+        # default here matches config.DEFAULTS["health"]["host"].
+        self._health = HealthServer(self.cfg.health.get("host", "127.0.0.1"),
                                     int(self.cfg.health.get("port", 8099)),
                                     self.healthz_snapshot)
         self._health.start()

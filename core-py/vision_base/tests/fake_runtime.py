@@ -12,6 +12,11 @@ snapshots. Behaviour knobs come from the environment:
 - ``FAKE_VERSION``: override the hello ``runtime_version`` (default
   ``0.1.0-fake``); a major/minor mismatch with ``vision_base`` makes
   ``RuntimeClient.start`` raise ``RuntimeError_`` (§6.14, M1.26).
+- ``FAKE_REJECT_STREAM=<id>``: answer ``ok:false`` to ``add`` for that
+  stream_id (optionally only while ``FAKE_REJECT_FILE`` exists), used to
+  exercise add rollback and replay isolation.
+- ``FAKE_DEAF=1``: send hello, then stop reading the IPC socket entirely
+  (the "child alive but not draining its socket" case).
 
 Usage: ``python fake_runtime.py --ipc-fd N``
 """
@@ -127,6 +132,12 @@ def handle_line(line: bytes) -> None:
     req = msg.get("req", "")
     if op == "add":
         idx = int(msg["stream"]["index"])
+        reject = os.environ.get("FAKE_REJECT_STREAM", "")
+        marker = os.environ.get("FAKE_REJECT_FILE", "")
+        if reject and msg["stream"].get("id") == reject \
+                and (not marker or os.path.exists(marker)):
+            send_reply(req, False, error=f"synthetic rejection of {reject}")
+            return
         send_reply(req, True, {"stream_index": idx})
         send_state(idx, "starting")
         if os.environ.get("FAKE_DEV_TENSORS"):
@@ -180,6 +191,9 @@ def main() -> None:
         time.sleep(120)
         os._exit(0)
     send_hello()
+    if os.environ.get("FAKE_DEAF"):
+        while True:                # alive, but never drains the socket
+            time.sleep(60)
     stats_loop()
     buf = b""
     while True:

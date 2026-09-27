@@ -38,13 +38,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ok: {cfg.device_id} ({len(cfg.streams)} streams)")
         return 0
 
+    from .config import ConfigError
     from .supervisor import Supervisor
-    if args.dev:
-        # §6.12: forward --dev to the native children (runtime_argv template).
-        sup = Supervisor(cfg, runtime_argv=[cfg.native["binary"],
-                                            "--ipc-fd", "{fd}", "--dev"])
-    else:
-        sup = Supervisor(cfg)
+    try:
+        if args.dev:
+            # §6.12: forward --dev to the native children (runtime_argv).
+            sup = Supervisor(cfg, runtime_argv=[cfg.native["binary"],
+                                                "--ipc-fd", "{fd}", "--dev"])
+        else:
+            sup = Supervisor(cfg)
+    except ConfigError as exc:
+        # §6.5: the app's plugins() are validated against the same rules as
+        # analyzers.plugins while the runtime config is generated.
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
 
     def _shutdown(signum, frame):
         sup.stop()

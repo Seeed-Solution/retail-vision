@@ -12,6 +12,14 @@ from . import __version__, procstat
 
 __all__ = ["build_healthz", "HealthServer"]
 
+# The endpoint is unauthenticated, so it is bounded on both axes (review
+# item 20): a request may not hold a thread open indefinitely, and the number
+# of concurrent connections is capped. Both are per-supervisor-process limits;
+# the binding address — not these — is what keeps the endpoint off the
+# network by default (`health.host`, config.py).
+REQUEST_TIMEOUT_S = 5.0
+MAX_CONNECTIONS = 32
+
 
 def build_healthz(*, device_id: str, backend: str, uptime_s: float,
                   control_connected: bool,
@@ -66,7 +74,11 @@ def build_healthz(*, device_id: str, backend: str, uptime_s: float,
                 "restarts": int(rt.get("restarts", 0)),
                 "rss_kb": rt.get("rss_kb"), "cpu_s": rt.get("cpu_s"),
                 "version": rt.get("version", ""),
-                "backend": rt.get("backend", "")},
+                "backend": rt.get("backend", ""),
+                # §6.9 rule 2: the shard gave up restarting its vb-runtime.
+                # The Python shard is still alive, so without this the report
+                # says "ok" while no stream can run (review item 16).
+                "failed": bool(rt.get("failed"))},
             **({"app": sh["app"]} if isinstance(sh.get("app"), dict) else {}),
             **({"hook_budget": sh["hook_budget"]}
                if isinstance(sh.get("hook_budget"), dict) else {}),
@@ -78,8 +90,11 @@ def build_healthz(*, device_id: str, backend: str, uptime_s: float,
     if merged is not None:
         body["app"] = merged
 
+    runtime_failed = any((sh.get("runtime") or {}).get("failed")
+                         for sh in shards)
     healthy = bool(shards) and all(sh["alive"] for sh in shards) \
-        and all(publish_connected) and control_connected
+        and all(publish_connected) and control_connected \
+        and not runtime_failed
     if not healthy:
         body["status"] = "degraded"
     return body
@@ -115,15 +130,64 @@ def _merge_app(parts: list[dict]) -> dict | None:
     return out
 
 
+class _BoundedHTTPServer(ThreadingHTTPServer):
+    """``ThreadingHTTPServer`` with a cap on live connections.
+
+    One thread (and one file descriptor) per connection is fine when the
+    clients are probes; an unauthenticated endpoint must not let a handful of
+    half-open connections exhaust the supervisor's threads and FDs (review
+    item 20). Connections beyond the cap are shed with 503.
+    """
+
+    daemon_threads = True
+    request_queue_size = 16
+
+    def __init__(self, addr, handler, *, max_connections: int = MAX_CONNECTIONS):
+        super().__init__(addr, handler)
+        self._slots = threading.BoundedSemaphore(max_connections)
+        self.shed = 0        # connections refused over the cap
+        self.served = 0      # connections that got a worker thread
+
+    def process_request(self, request, client_address) -> None:
+        if not self._slots.acquire(blocking=False):
+            self.shed += 1
+            self._shed(request)
+            return
+        self.served += 1
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def _shed(self, request) -> None:
+        try:
+            request.sendall(b"HTTP/1.1 503 Service Unavailable\r\n"
+                            b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+        except OSError:
+            pass
+        self.shutdown_request(request)
+
+
 class HealthServer:
     """GET /healthz -> 200 (ok) or 503 (degraded); body from ``snapshot_fn``."""
 
-    def __init__(self, host: str, port: int, snapshot_fn):
+    def __init__(self, host: str, port: int, snapshot_fn,
+                 *, max_connections: int = MAX_CONNECTIONS):
         self.snapshot_fn = snapshot_fn
         self.port = port
         server = self
 
         class Handler(BaseHTTPRequestHandler):
+            # a slow or half-open client must not occupy a thread forever
+            timeout = REQUEST_TIMEOUT_S
+
             def do_GET(self):  # noqa: N802
                 if self.path.split("?")[0] != "/healthz":
                     self.send_response(404)
@@ -146,7 +210,8 @@ class HealthServer:
             def log_message(self, *args):  # silence
                 pass
 
-        self._srv = ThreadingHTTPServer((host, port), Handler)
+        self._srv = _BoundedHTTPServer((host, port), Handler,
+                                       max_connections=max_connections)
         if port == 0:
             self.port = self._srv.server_address[1]
         self._thread = threading.Thread(target=self._srv.serve_forever,

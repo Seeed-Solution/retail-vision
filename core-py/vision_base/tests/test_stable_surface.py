@@ -7,6 +7,11 @@ Covers every acceptance bullet of the §8 M1.26 row:
 - temp module with a renamed AppHooks.on_event parameter -> fails;
 - fake runtime hello with mismatched runtime_version major.minor ->
   RuntimeError_.
+
+Plus the coverage gaps closed in review: **nested** schema objects (a new
+required field there is breaking, a new optional one is not), classmethod /
+property / public state fields, the ``vision_base.types`` dataclasses, and
+position-sensitive C ABI member lists.
 """
 from __future__ import annotations
 
@@ -114,6 +119,53 @@ def test_added_optional_property_passes(tmp_path):
     assert any("confidence" in a for a in additions)
 
 
+def test_added_nested_required_field_fails(tmp_path):
+    """A new *required* field in a nested object is breaking, not additive:
+    every existing config that omits it stops validating (§6.14.1)."""
+    contracts, fixtures = temp_contracts(tmp_path)
+    path = contracts / "vb-config.schema.json"
+    doc = json.loads(path.read_text())
+    doc["properties"]["streams"]["items"]["required"].append("zone_id")
+    path.write_text(json.dumps(doc))
+    errors, additions = check_with(contracts, fixtures)
+    assert any("required" in e and "zone_id" in e for e in errors)
+    assert not any("zone_id" in a for a in additions)
+
+
+def test_added_nested_optional_property_passes(tmp_path):
+    contracts, fixtures = temp_contracts(tmp_path)
+    path = contracts / "vb-config.schema.json"
+    doc = json.loads(path.read_text())
+    doc["properties"]["streams"]["items"]["properties"]["zone_id"] = {
+        "type": "string", "default": ""}
+    path.write_text(json.dumps(doc))
+    errors, additions = check_with(contracts, fixtures)
+    assert errors == []
+    assert any("zone_id" in a for a in additions)
+
+
+def test_changed_nested_default_fails(tmp_path):
+    """Default values are part of the stable surface (§6.14.1), including
+    the ones nested below the root object."""
+    contracts, fixtures = temp_contracts(tmp_path)
+    path = contracts / "vb-config.schema.json"
+    doc = json.loads(path.read_text())
+    doc["properties"]["mqtt"]["properties"]["port"]["default"] = 1884
+    path.write_text(json.dumps(doc))
+    errors, _ = check_with(contracts, fixtures)
+    assert any("port.default" in e and "1884" in e for e in errors)
+
+
+def test_removed_nested_property_fails(tmp_path):
+    contracts, fixtures = temp_contracts(tmp_path)
+    path = contracts / "vb-config.schema.json"
+    doc = json.loads(path.read_text())
+    del doc["properties"]["mqtt"]["properties"]["port"]
+    path.write_text(json.dumps(doc))
+    errors, _ = check_with(contracts, fixtures)
+    assert any("mqtt.properties.port" in e for e in errors)
+
+
 def test_removed_event_field_fails(tmp_path):
     contracts, fixtures = temp_contracts(tmp_path)
     # The recorded field set is a union over all fixtures of an analyzer,
@@ -171,6 +223,52 @@ def test_added_hook_method_is_only_an_addition(tmp_path):
     assert any("on_optional_new" in a for a in additions)
 
 
+# ------------------------------------------- types, classmethod, property
+
+def test_types_dataclasses_are_recorded():
+    """§6.14.1 puts the user-visible ``vision_base.types`` dataclass fields
+    on the stable surface, so they must be in the snapshot."""
+    types = json.loads((REPO / "contracts" / "stable-surface.json")
+                       .read_text())["python"]["types"]
+    assert "Hello" in types and "Detection" in types
+    assert types["Detection"]["keypoints"]["default"] == "()"
+    assert types["StreamSpec"]["options"]["default"] == "factory:dict"
+    assert types["Detection"]["cx"]["type"] == "float"
+
+
+def test_removed_types_field_fails():
+    recorded = json.loads((REPO / "contracts" / "stable-surface.json")
+                          .read_text())
+    current = dict(vss.build_snapshot(REPO))
+    del current["python"]["types"]["Detection"]["keypoints"]
+    errors, _ = vss.compare(recorded, current)
+    assert any("python.types.Detection.keypoints" in e for e in errors)
+
+
+def test_classmethod_property_and_state_fields_are_recorded():
+    surface = json.loads((REPO / "contracts" / "stable-surface.json")
+                         .read_text())["python"]
+    assert surface["embed.Runtime"]["from_config"].startswith("classmethod")
+    assert surface["apps.ConfigApp"]["wants_frames"] == "property"
+    assert surface["mqtt.MqttClient"]["connected"] == "property"
+    # public state fields: instance attributes and annotated protocol attrs
+    assert surface["hooks.StreamContext"]["state"] == "attribute"
+    assert surface["embed.Runtime"]["frames_dropped"] == "attribute"
+    assert surface["hooks.AppHooks"]["wants_frames"] == "attribute: bool"
+
+
+def test_removed_classmethod_and_property_fail():
+    recorded = json.loads((REPO / "contracts" / "stable-surface.json")
+                          .read_text())
+    for surface, member in (("embed.Runtime", "from_config"),
+                            ("apps.ConfigApp", "wants_frames"),
+                            ("hooks.StreamContext", "state")):
+        current = dict(vss.build_snapshot(REPO))
+        del current["python"][surface][member]
+        errors, _ = vss.compare(recorded, current)
+        assert any(f"python.{surface}.{member}" in e for e in errors), member
+
+
 def test_abi_change_fails(tmp_path):
     header = tmp_path / "vb_analyzer_abi.h"
     text = (REPO / vss.ABI_HEADER).read_text().replace(
@@ -181,6 +279,28 @@ def test_abi_change_fails(tmp_path):
     errors, _ = vss.compare(recorded, dict(vss.build_snapshot(REPO),
                                            abi=vss.collect_abi(header)))
     assert any("abi.VB_ANALYZER_ABI" in e for e in errors)
+
+
+def test_abi_member_reorder_fails():
+    """Reordering struct members keeps the name set but moves every binary
+    offset: the C ABI lists must be compared positionally, not as sets."""
+    recorded = json.loads((REPO / "contracts" / "stable-surface.json")
+                          .read_text())
+    current = dict(vss.build_snapshot(REPO))
+    members = list(current["abi"]["structs"]["vb_track"])
+    members[0], members[1] = members[1], members[0]
+    current["abi"]["structs"]["vb_track"] = members
+    errors, _ = vss.compare(recorded, current)
+    assert any("abi.structs.vb_track" in e for e in errors)
+
+
+def test_abi_member_removal_fails():
+    recorded = json.loads((REPO / "contracts" / "stable-surface.json")
+                          .read_text())
+    current = dict(vss.build_snapshot(REPO))
+    current["abi"]["structs"]["vb_frame_meta"].pop(0)
+    errors, _ = vss.compare(recorded, current)
+    assert any("abi.structs.vb_frame_meta" in e for e in errors)
 
 
 # ------------------------------------------------------- runtime versioning

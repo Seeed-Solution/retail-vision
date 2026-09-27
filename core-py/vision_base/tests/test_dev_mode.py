@@ -288,18 +288,27 @@ def test_vbt1_outside_dev_mode_closes_connection(case):
     try:
         shard.start()
         client = shard._client
+        added = True
         try:
             shard.add_stream(StreamSpec("cam-0", "fake://"))
         except RuntimeGone:
-            pass  # the VBT1 record can close the socket before the add reply
+            # the record closes the socket, and whether the add reply was
+            # consumed before the reader tears the waiters down is a race
+            added = False
         assert client is not None
         wait_for(lambda: client.last_wire_error != "",
                  what="wire error recorded")
         assert client.last_wire_error == \
             "unexpected VBT1 record outside dev mode"
-        # the error is recorded as a stream state before the connection closes
-        wait_for(lambda: any(s[1] == "error" for s in app.states),
-                 what="error state delivered")
+        if added:
+            # the add completed, so the runtime's error is that stream's state
+            wait_for(lambda: any(s[1] == "error" for s in app.states),
+                     what="error state delivered")
+        else:
+            # the add failed along with the connection: the stream is rolled
+            # back (review item 7), so it holds no slot in the shard
+            assert shard.stream_status() == []
+            assert shard.contexts == {}
         # connection closed: reader loop hits EOF, client reports exit
         wait_for(lambda: shard._client is None or shard.runtime_restarts >= 1,
                  what="connection closed after VBT1 outside dev mode")
