@@ -21,6 +21,7 @@
 #include "vb/backend.h"
 #include "vb/json.h"
 #include "vb/tracker.h"
+#include "vb/vb_analyzer_abi.h"
 #include "vb/wire.h"
 
 namespace vb {
@@ -44,17 +45,37 @@ private:
 struct WriterConfig {
     size_t frame_queue = 256;
     size_t event_backpressure_limit = 4096;
+    // B8: how long stop() lets the writer thread flush queued records before
+    // the flush deadline expires and a sink blocked on a peer that stopped
+    // reading abandons the record. Bounds how long stop() can block.
+    int stop_flush_ms = 500;
 };
 
 class Writer {
 public:
     explicit Writer(WriterConfig cfg = WriterConfig());
+    // Stops and joins if the owner forgot; a joinable std::thread reaching the
+    // destructor would terminate the process (B4).
+    ~Writer();
 
     using Sink = std::function<void(const uint8_t* data, size_t len)>;
 
     void start(Sink sink);
     // Flushes queued records (sink called on the caller thread) and joins.
     void stop();
+
+    // B8: releases everything that stop() would release, without joining.
+    // Producers parked in push_event() (event queue over the backpressure
+    // limit) return, and the sink's flush deadline starts. Runtime::stop()
+    // calls this before joining the context pool, which would otherwise wait
+    // on producers blocked behind a stalled sink.
+    void request_stop();
+
+    // B8: true once request_stop() has been called and the flush window has
+    // elapsed. A sink whose peer keeps the connection open but stops reading
+    // polls this between write slices and abandons the record instead of
+    // blocking the writer thread (and therefore stop()'s join) forever.
+    bool flush_expired() const;
 
     void push_frame(std::vector<uint8_t> rec);  // may drop the oldest frame record
     void push_event(std::vector<uint8_t> rec);  // never dropped; blocks past the limit
@@ -79,6 +100,8 @@ private:
     size_t frames_queued_ = 0, events_queued_ = 0;
     uint64_t frames_dropped_ = 0, event_backpressure_ = 0;
     bool running_ = false, stopping_ = false;
+    // Steady-clock ms at which the stop-time flush gives up; 0 = not stopping.
+    std::atomic<uint64_t> stop_deadline_ms_{0};
     std::thread::id writer_thread_{};
 };
 
@@ -103,7 +126,11 @@ private:
     std::string state_ = "starting", error_, decode_;
     uint64_t processed_ = 0, dropped_ = 0, rate_skipped_ = 0;
     std::deque<float> inf_ms_, qd_ms_;
-    std::deque<double> frame_walls_;
+    // Frame wall-clock stamps of the last second. Pruned against the current
+    // time by to_json() as well as by record_frame(): a stream that stopped
+    // producing frames must not keep reporting its last FPS (the window has to
+    // reflect "now", not "the last frame").
+    mutable std::deque<double> frame_walls_;
     double last_wall_ = 0;
 };
 
@@ -116,6 +143,12 @@ struct RuntimeConfig {
     double reconnect_delay_s = 1.0;
     double status_interval_s = 1.0;
     TrackerConfig tracker;
+    // §6.6 `tracker.enabled` (default true). When false the runtime builds no
+    // per-stream tracking: every detection is passed to the analyzer chain
+    // with track_id 0 and an analyzer whose needs_tracks() is true is rejected
+    // at add(). Read from the same key config.py validates (§6.11 classify
+    // requires it to be false), so validation and execution agree (A4).
+    bool tracker_enabled = true;
     std::vector<std::string> plugin_paths;  // preloaded analyzer plugins
     int snapshot_ring = 2;
     DevConfig dev;                          // §6.12 dev-mode tensor passthrough
@@ -127,6 +160,35 @@ struct RuntimeConfig {
     static RuntimeConfig from_json(const Json& j, std::string& err,
                                    bool allow_dev = false);
 };
+
+// ---- Analyzer plugins (§6.2) ----
+// A configured plugin .so, loaded and validated once at Runtime::start().
+// `id` is the plugin's own api.name: the only handle a control line may use
+// to select it. The path itself never comes from a request (C2).
+struct AnalyzerPlugin {
+    std::string id;
+    std::string path;
+    std::shared_ptr<void> handle;           // dlopen handle; dlclose on last release
+    const vb_analyzer_api* api = nullptr;
+};
+
+// plugin_loader.cpp (vb_algo): dlopen `so_path` and validate the API table.
+// On success returns the handle (kept open while any reference lives) and sets
+// *api; on failure returns nullptr with err set. Initialisation code in the
+// library runs inside dlopen, so callers must pass only protected config paths.
+std::shared_ptr<void> load_plugin_api(const std::string& so_path,
+                                      const vb_analyzer_api** api,
+                                      std::string& err);
+
+// plugin_loader.cpp: validate the mandatory callbacks and attribute metadata
+// of a plugin API table. A table that passes is safe to call into; one that
+// fails must never be used (create/destroy/on_frame/on_track_removed null).
+bool validate_plugin_api(const vb_analyzer_api* api, std::string& err);
+
+// plugin_loader.cpp: wrap an already validated (handle, api) pair as an
+// Analyzer instance for one stream (create() runs on configure()).
+std::unique_ptr<Analyzer> make_plugin_analyzer(std::shared_ptr<void> handle,
+                                               const vb_analyzer_api* api);
 
 class ContextPool;  // below
 
@@ -156,6 +218,9 @@ struct StreamState {
     StreamSpec spec;
     LatestFrame latest;
     Tracker tracker;
+    // §6.6 tracker.enabled for this stream. When false `tracker` is never
+    // updated: detections are wrapped as track_id=0, hits=1, misses=0 tracks.
+    bool track_enabled = true;
     std::vector<std::unique_ptr<Analyzer>> analyzers;
     std::vector<std::string> analyzer_names;
     StreamMetrics metrics;
@@ -163,7 +228,12 @@ struct StreamState {
     // Holder exclusion (busy set) + remove handshake.
     std::mutex holder_mu;
     std::condition_variable holder_cv;
-    bool busy = false, removing = false;
+    bool busy = false;  // guarded by holder_mu
+    // Removal handshake: atomic so remove() can stop new claims without
+    // waiting for the frame lock, which a context thread holds for a whole
+    // frame (a 6 s inference would otherwise make the removal wait for it and
+    // report success for a stream it never stopped).
+    std::atomic<bool> removing{false};
 
     // Pending control items applied by the holder thread before the next
     // frame (configure_analyzer semantics, §6.3).
@@ -239,6 +309,14 @@ private:
     std::shared_ptr<StreamState> add_stream_locked(const StreamSpec& spec,
                                                    const Json& analyzers,
                                                    std::string& err);
+    // C2: resolves a control-plane analyzer name to an analyzer. Accepts only
+    // built-in names and "plugin:<id>" ids registered from analyzers.plugins;
+    // a name that carries a path is rejected, never dlopen'd.
+    std::unique_ptr<Analyzer> make_stream_analyzer(const std::string& name,
+                                                   std::string& err) const;
+    // Loads and validates every analyzers.plugins path (§6.2: a plugin that
+    // fails to load aborts startup rather than being skipped silently).
+    bool load_configured_plugins(std::string& err);
     // §6.12: when dev mode is active (dev.raw_tensors + backend.decoder.type
     // == "raw"), rate-limit and push a VBT1 record for this frame.
     void maybe_send_dev_tensors(StreamState& s, const FrameBuf& f,
@@ -261,6 +339,8 @@ private:
     std::thread stats_thread_;
     std::atomic<bool> stopping_{false};
     std::atomic<bool> stop_requested_{false};
+    // Plugin whitelist: built once from the protected config, read-only after.
+    std::vector<AnalyzerPlugin> plugins_;
 
     bool dev_active_ = false;  // dev.raw_tensors && decoder.type == "raw"
     std::atomic<uint64_t> dev_tensor_oversize_{0};
@@ -271,7 +351,16 @@ private:
 // the peer closes, a line exceeds the cap, or stop was requested.
 void serve_fd(int conn_fd, Runtime& rt);
 
-// Write a full buffer to a fd (handles partial writes; returns false on EOF).
-bool write_all_fd(int fd, const uint8_t* data, size_t len);
+// Writes a full buffer to a fd (handles partial writes; returns false on EOF).
+//
+// B8: the write is a bounded, cancellable wait rather than a blocking send().
+// The buffer is written with poll() slices of at most 50 ms; `cancel` is
+// polled between slices and a true result abandons the write (returns false),
+// and `deadline_ms` > 0 abandons it once the whole call has taken that long.
+// A peer that keeps the connection open but stops reading therefore stalls
+// neither the writer thread nor stop()'s join.
+bool write_all_fd(int fd, const uint8_t* data, size_t len,
+                  const std::function<bool()>& cancel = {},
+                  int deadline_ms = 0);
 
 }  // namespace vb

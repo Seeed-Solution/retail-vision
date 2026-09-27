@@ -3,10 +3,20 @@
 #include "vb/runtime.h"
 
 #include <algorithm>
+#include <chrono>
 
 namespace vb {
 
 namespace {
+
+// One-second FPS window, in the same epoch-ms unit as FrameBuf::wall_ms.
+constexpr double kFpsWindowMs = 1000.0;
+
+double wall_ms_now() {
+    using namespace std::chrono;
+    return duration_cast<duration<double, std::milli>>(
+               system_clock::now().time_since_epoch()).count();
+}
 
 double percentile(std::deque<float> sorted, double p) {
     if (sorted.empty()) return 0.0;
@@ -39,7 +49,7 @@ void StreamMetrics::record_frame(float inference_ms, float queue_delay_ms, doubl
     if (inf_ms_.size() > 256) inf_ms_.pop_front();
     if (qd_ms_.size() > 256) qd_ms_.pop_front();
     frame_walls_.push_back(wall_ms);
-    while (!frame_walls_.empty() && wall_ms - frame_walls_.front() > 1000.0)
+    while (!frame_walls_.empty() && wall_ms - frame_walls_.front() > kFpsWindowMs)
         frame_walls_.pop_front();
     last_wall_ = wall_ms;
 }
@@ -74,9 +84,15 @@ Json StreamMetrics::to_json(uint32_t stream_index) const {
     Json j;
     j["stream_index"] = stream_index;
     j["state"] = state_;
+    // The window is measured against the query time, not against the last
+    // frame: a stream that stopped producing frames a while ago must report
+    // 0 fps instead of the rate it had when it was still running.
+    const double now = wall_ms_now();
+    while (!frame_walls_.empty() && now - frame_walls_.front() > kFpsWindowMs)
+        frame_walls_.pop_front();
     double fps = 0.0;
     if (!frame_walls_.empty()) {
-        double span = (last_wall_ - frame_walls_.front()) / 1000.0;
+        double span = (now - frame_walls_.front()) / 1000.0;
         fps = span > 0.05 ? static_cast<double>(frame_walls_.size()) / span
                           : static_cast<double>(frame_walls_.size());
     }

@@ -5,29 +5,61 @@
 #include "vb/runtime.h"
 
 #include <algorithm>
+#include <chrono>
 
 namespace vb {
 
+namespace {
+
+uint64_t steady_ms() {
+    using namespace std::chrono;
+    return static_cast<uint64_t>(
+        duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
+}
+
+}  // namespace
+
 Writer::Writer(WriterConfig cfg) : cfg_(cfg) {}
+
+Writer::~Writer() { stop(); }
 
 void Writer::start(Sink sink) {
     sink_ = std::move(sink);
     {
         std::lock_guard<std::mutex> lk(mu_);
         running_ = true;
+        stopping_ = false;
+        stop_deadline_ms_ = 0;
     }
     thread_ = std::thread([this] { run(); });
 }
 
-void Writer::stop() {
+void Writer::request_stop() {
     {
         std::lock_guard<std::mutex> lk(mu_);
         stopping_ = true;
+        // The flush window is armed once; repeated calls leave it alone.
+        if (stop_deadline_ms_.load() == 0) {
+            stop_deadline_ms_ = steady_ms() +
+                                static_cast<uint64_t>(std::max(0, cfg_.stop_flush_ms));
+        }
     }
+    // Release both producer waits: cv_full_ (event queue over the backpressure
+    // limit) and cv_pop_ (the writer thread).
     cv_pop_.notify_all();
     cv_full_.notify_all();
+}
+
+bool Writer::flush_expired() const {
+    uint64_t deadline = stop_deadline_ms_.load(std::memory_order_relaxed);
+    return deadline != 0 && steady_ms() >= deadline;
+}
+
+void Writer::stop() {
+    request_stop();
     if (thread_.joinable()) thread_.join();
-    // Drain what is left on the caller thread (flush semantics).
+    // Drain what is left on the caller thread (flush semantics). The sink
+    // still sees flush_expired(), so a peer that is gone cannot block here.
     std::lock_guard<std::mutex> lk(mu_);
     while (!q_.empty()) {
         Entry& e = q_.front();

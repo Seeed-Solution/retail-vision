@@ -1,7 +1,8 @@
 // Control protocol end-to-end over a socketpair (spec BASE-1 §8 M1.8):
 // hello, add ok-reply + stream_state, VBR1 frames, stats, set_threshold,
-// configure_analyzer (unknown analyzer error), snapshot unsupported reply,
-// remove, stop (exit within 1 s).
+// configure_analyzer (unknown analyzer error), snapshot (VBS1 record when
+// built with JPEG, "snapshot unsupported" reply otherwise), remove, stop
+// (exit within 1 s).
 #include <mutex>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -201,13 +202,53 @@ int main() {
     CHECK(ca.at("error").get<std::string>() ==
           "no analyzer line_cross on stream 3");
 
-    // snapshot: built without JPEG -> ok:false "snapshot unsupported"
+    // snapshot: the branch depends on whether JPEG encoding was compiled in
+    // (VB_WITH_JPEG). Without it the op is refused with a control reply; with
+    // it the newest ring frame is encoded and pushed as an out-of-band VBS1
+    // record on the data channel, and no VBC1 reply is sent at all — so the
+    // test must follow the branch this build actually compiles (§6.10.3).
     CHECK(peer.send_line(
         R"({"op":"snapshot","req":"r-4","stream_index":3,"seq":0,"track_id":0,"crop":true,"max_side":320})"));
+#if defined(VB_HAVE_JPEG)
+    bool got_vbs1 = false;
+    for (;;) {
+        std::string magic;
+        std::vector<uint8_t> body;
+        if (!peer.read_rec(magic, body)) break;
+        if (magic == "VBC1") {
+            Json j = json_parse(std::string(body.begin(), body.end()));
+            // VBS1 replaces the reply: a control reply for r-4 would mean the
+            // snapshot silently failed instead of being encoded.
+            CHECK(j.dump().find("\"r-4\"") == std::string::npos);
+            peer.pending.emplace_back(magic, j);
+        } else if (magic == "VBS1") {
+            got_vbs1 = true;
+            uint32_t meta_len = 0;
+            CHECK(body.size() >= 4);
+            std::memcpy(&meta_len, body.data(), 4);
+            CHECK(body.size() >= 4u + meta_len);
+            Json meta = json_parse(std::string(body.begin() + 4,
+                                               body.begin() + 4 + meta_len));
+            CHECK(meta.at("req").get<std::string>() == "r-4");
+            CHECK(meta.at("mime").get<std::string>() == "image/jpeg");
+            CHECK(meta.at("seq").get<uint64_t>() > 0);  // a real ring frame
+            CHECK(meta.at("w").get<int>() > 0);
+            CHECK(meta.at("h").get<int>() > 0);
+            // Payload is a JPEG (SOI marker), not an empty buffer.
+            const size_t payload = body.size() - 4 - meta_len;
+            CHECK(payload > 2);
+            CHECK(body[4 + meta_len] == 0xFF && body[5 + meta_len] == 0xD8);
+            break;
+        }
+        // VBR1 frames simply keep streaming while we look for the record.
+    }
+    CHECK(got_vbs1);
+#else
     Json snap = peer.wait_control("reply", "req", "\"r-4\"", 3000);
     CHECK(!snap.is_null());
     CHECK(snap.at("ok").get<bool>() == false);
     CHECK(snap.at("error").get<std::string>() == "snapshot unsupported");
+#endif
 
     // remove -> ok + stopped
     CHECK(peer.send_line(R"({"op":"remove","req":"r-5","stream_index":3})"));

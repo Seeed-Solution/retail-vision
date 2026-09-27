@@ -286,21 +286,45 @@ int main(int argc, char** argv) {
             }
         }
     }
-    writer.start([&conn_fd](const uint8_t* data, size_t len) {
-        if (conn_fd >= 0) vb::write_all_fd(conn_fd, data, len);
+    writer.start([&writer, &conn_fd](const uint8_t* data, size_t len) {
+        if (conn_fd < 0) return;
+        // B8: the peer may keep the connection open without reading. The write
+        // is abandoned once Writer's stop-time flush window expires, so
+        // writer.stop() can always join.
+        vb::write_all_fd(conn_fd, data, len,
+                         [&writer] { return writer.flush_expired(); });
     });
+
+    // B4: every exit past writer.start() has to stop and join the runtime and
+    // the writer first. A joinable std::thread reaching ~Writer terminates the
+    // process, so returning early turns a clean error exit into a crash.
+    auto bail = [&](int code) {
+        rt.stop();
+        writer.stop();
+        if (listen_fd >= 0) {
+            ::close(listen_fd);
+            listen_fd = -1;
+        }
+        if (conn_fd >= 0 && listen_path) {
+            ::close(conn_fd);
+            conn_fd = -1;
+        }
+        if (listen_path) ::unlink(listen_path);
+        return code;
+    };
 
     if (!rt.start(err)) {
         std::fprintf(stderr, "start: %s\n", err.c_str());
-        return 1;
+        return bail(1);
     }
 
     if (listen_fd >= 0) {
         conn_fd = ::accept(listen_fd, nullptr, nullptr);
         ::close(listen_fd);
+        listen_fd = -1;
         if (conn_fd < 0) {
             std::fprintf(stderr, "accept failed\n");
-            return 1;
+            return bail(1);
         }
     }
     rt.emit_hello();

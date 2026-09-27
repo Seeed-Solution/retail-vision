@@ -22,6 +22,12 @@ namespace vb {
 
 namespace {
 
+// Bounded waits at the control boundary: how long the application of a
+// control item may take before the reply reports failure, and how long a
+// remove waits for the context pool to release the stream.
+constexpr int kControlApplyTimeoutMs = 1000;
+constexpr int kRemoveBusyTimeoutMs = 2000;
+
 double now_s() {
     using namespace std::chrono;
     return duration_cast<duration<double>>(steady_clock::now().time_since_epoch()).count();
@@ -30,7 +36,138 @@ double now_s() {
 std::string json_get_str(const Json& j, const char* key, const std::string& dflt = "") {
     auto it = j.find(key);
     if (it == j.end() || it->is_null()) return dflt;
+    if (!it->is_string()) return dflt;
     return it->get<std::string>();
+}
+
+// ---- Required-field accessors (B1) ----
+// A control line is untrusted input (it may arrive over the MQTT control
+// plane). Handlers validate their required fields with these instead of
+// nlohmann's at(), whose out_of_range would escape to the fd server and
+// terminate the process.
+
+bool need_object(const Json& j, const char* key, const Json*& out, std::string& err) {
+    auto it = j.find(key);
+    if (it == j.end() || !it->is_object()) {
+        err = std::string("missing or invalid field: ") + key;
+        return false;
+    }
+    out = &*it;
+    return true;
+}
+
+bool need_u32(const Json& j, const char* key, uint32_t& out, std::string& err) {
+    auto it = j.find(key);
+    if (it == j.end() || !it->is_number_integer()) {
+        err = std::string("missing or invalid field: ") + key;
+        return false;
+    }
+    int64_t v = it->get<int64_t>();
+    if (v < 0 || v > static_cast<int64_t>(UINT32_MAX)) {
+        err = std::string("out of range field: ") + key;
+        return false;
+    }
+    out = static_cast<uint32_t>(v);
+    return true;
+}
+
+bool need_u64(const Json& j, const char* key, uint64_t& out, std::string& err) {
+    auto it = j.find(key);
+    if (it == j.end() || !it->is_number_integer()) {
+        err = std::string("missing or invalid field: ") + key;
+        return false;
+    }
+    int64_t v = it->get<int64_t>();
+    if (v < 0) {
+        err = std::string("out of range field: ") + key;
+        return false;
+    }
+    out = static_cast<uint64_t>(v);
+    return true;
+}
+
+bool need_int(const Json& j, const char* key, int& out, std::string& err) {
+    auto it = j.find(key);
+    if (it == j.end() || !it->is_number_integer()) {
+        err = std::string("missing or invalid field: ") + key;
+        return false;
+    }
+    out = it->get<int>();
+    return true;
+}
+
+bool need_number(const Json& j, const char* key, double& out, std::string& err) {
+    auto it = j.find(key);
+    if (it == j.end() || !it->is_number()) {
+        err = std::string("missing or invalid field: ") + key;
+        return false;
+    }
+    out = it->get<double>();
+    return true;
+}
+
+bool need_string(const Json& j, const char* key, std::string& out, std::string& err) {
+    auto it = j.find(key);
+    if (it == j.end() || !it->is_string()) {
+        err = std::string("missing or invalid field: ") + key;
+        return false;
+    }
+    out = it->get<std::string>();
+    return true;
+}
+
+bool need_bool(const Json& j, const char* key, bool& out, std::string& err) {
+    auto it = j.find(key);
+    if (it == j.end() || !it->is_boolean()) {
+        err = std::string("missing or invalid field: ") + key;
+        return false;
+    }
+    out = it->get<bool>();
+    return true;
+}
+
+// Reads an optional field: absent/null keeps the default, a present field of
+// the wrong type is an error rather than a silent fallback.
+bool opt_u64(const Json& j, const char* key, uint64_t dflt, uint64_t& out,
+             std::string& err) {
+    auto it = j.find(key);
+    if (it == j.end() || it->is_null()) {
+        out = dflt;
+        return true;
+    }
+    return need_u64(j, key, out, err);
+}
+
+bool opt_u32(const Json& j, const char* key, uint32_t dflt, uint32_t& out,
+             std::string& err) {
+    auto it = j.find(key);
+    if (it == j.end() || it->is_null()) {
+        out = dflt;
+        return true;
+    }
+    return need_u32(j, key, out, err);
+}
+
+bool opt_int(const Json& j, const char* key, int dflt, int& out, std::string& err) {
+    auto it = j.find(key);
+    if (it == j.end() || it->is_null()) {
+        out = dflt;
+        return true;
+    }
+    return need_int(j, key, out, err);
+}
+
+bool opt_bool(const Json& j, const char* key, bool dflt, bool& out, std::string& err) {
+    auto it = j.find(key);
+    if (it == j.end() || it->is_null()) {
+        out = dflt;
+        return true;
+    }
+    return need_bool(j, key, out, err);
+}
+
+bool has_so_suffix(const std::string& name) {
+    return name.size() > 3 && name.compare(name.size() - 3, 3, ".so") == 0;
 }
 
 }  // namespace
@@ -75,6 +212,17 @@ RuntimeConfig RuntimeConfig::from_json(const Json& j, std::string& err,
         c.status_interval_s = std::max(0.2, read_dbl("status_interval_s", 1.0));
         auto tr = j.find("tracker");
         if (tr != j.end() && tr->is_object()) {
+            // §6.6: tracker.enabled is the single key config.py validates
+            // (§6.11 classify requires it false) and the runtime executes on;
+            // the type rule matches config.py:285.
+            auto en = tr->find("enabled");
+            if (en != tr->end() && !en->is_null()) {
+                if (!en->is_boolean()) {
+                    err = "tracker.enabled: must be a boolean";
+                    return c;
+                }
+                c.tracker_enabled = en->get<bool>();
+            }
             auto rd = [&](const char* k, double d) {
                 auto it = tr->find(k);
                 return (it != tr->end() && it->is_number()) ? it->get<double>() : d;
@@ -161,11 +309,60 @@ Runtime::Runtime(std::unique_ptr<Backend> backend, RuntimeConfig cfg, Writer& wr
 
 Runtime::~Runtime() { stop(); }
 
+bool Runtime::load_configured_plugins(std::string& err) {
+    for (const auto& path : cfg_.plugin_paths) {
+        const vb_analyzer_api* api = nullptr;
+        std::shared_ptr<void> handle = load_plugin_api(path, &api, err);
+        if (!handle) return false;
+        // §6.2: the plugin's own api.name is the id control lines select it
+        // by. Two paths registering the same id would make that ambiguous.
+        for (const auto& e : plugins_) {
+            if (e.id == api->name) {
+                err = "duplicate analyzer plugin id '" + std::string(api->name) +
+                      "' (" + e.path + ", " + path + ")";
+                return false;
+            }
+        }
+        AnalyzerPlugin e;
+        e.id = api->name;
+        e.path = path;
+        e.handle = std::move(handle);
+        e.api = api;
+        plugins_.push_back(std::move(e));
+    }
+    return true;
+}
+
+std::unique_ptr<Analyzer> Runtime::make_stream_analyzer(const std::string& name,
+                                                       std::string& err) const {
+    // C2: a request-supplied name that carries a path is rejected outright and
+    // never reaches dlopen. Only ids declared in analyzers.plugins (protected
+    // config, loaded at start) can select a plugin.
+    if (name.find('/') != std::string::npos || has_so_suffix(name)) {
+        err = "analyzer name must not be a path: " + name;
+        return nullptr;
+    }
+    static const char kPluginPrefix[] = "plugin:";
+    if (name.compare(0, sizeof(kPluginPrefix) - 1, kPluginPrefix) == 0) {
+        std::string id = name.substr(sizeof(kPluginPrefix) - 1);
+        for (const auto& p : plugins_) {
+            if (p.id == id) return make_plugin_analyzer(p.handle, p.api);
+        }
+        err = "unknown plugin: " + id + " (not registered in analyzers.plugins)";
+        return nullptr;
+    }
+    return create_analyzer(name, err);
+}
+
 bool Runtime::start(std::string& err) {
     if (!backend_) {
         err = "no backend";
         return false;
     }
+    // §6.2: analyzers.plugins is the plugin whitelist; loading it here means a
+    // plugin that fails to load (or an incomplete API table) aborts startup
+    // instead of being skipped silently, and no add() can name an unknown path.
+    if (!load_configured_plugins(err)) return false;
     for (int i = 0; i < cfg_.contexts; ++i) {
         auto ctx = backend_->create_context(i, err);
         if (!ctx) return false;
@@ -180,6 +377,11 @@ bool Runtime::start(std::string& err) {
 void Runtime::stop() {
     if (stopping_.exchange(true)) return;
     stop_requested_ = true;
+    // B8: release the writer's queue waits before joining the context pool.
+    // With the output peer gone, producers park in Writer::push_event once the
+    // event queue is over the backpressure limit, and the pool join would wait
+    // for them forever.
+    writer_.request_stop();
     if (pool_) pool_->stop();
     // Stop source threads: mark removing, join, then drop the streams.
     std::vector<std::pair<uint32_t, std::thread>> threads;
@@ -188,7 +390,7 @@ void Runtime::stop() {
         threads = std::move(source_threads_);
         source_threads_.clear();
         for (auto& kv : streams_) {
-            std::lock_guard<std::mutex> hlk(kv.second->holder_mu);
+            // atomic: no frame lock, so a long frame cannot delay shutdown
             kv.second->removing = true;
             kv.second->holder_cv.notify_all();
         }
@@ -297,46 +499,71 @@ void Runtime::stats_thread() {
 bool Runtime::handle_line(const Json& line) {
     std::string op = json_get_str(line, "op");
     std::string req = json_get_str(line, "req");
-    if (op == "add") op_add(line);
-    else if (op == "remove") op_remove(line);
-    else if (op == "set_threshold") op_set_threshold(line);
-    else if (op == "configure_analyzer") op_configure_analyzer(line);
-    else if (op == "snapshot") op_snapshot(line);
-    else if (op == "stop") op_stop(line);
-    else reply(req, false, Json(), "unknown op: " + (op.empty() ? "?" : op));
-    return op == "stop";
+    bool stop = false;
+    try {
+        if (op == "add") op_add(line);
+        else if (op == "remove") op_remove(line);
+        else if (op == "set_threshold") op_set_threshold(line);
+        else if (op == "configure_analyzer") op_configure_analyzer(line);
+        else if (op == "snapshot") op_snapshot(line);
+        else if (op == "stop") op_stop(line);
+        else reply(req, false, Json(), "unknown op: " + (op.empty() ? "?" : op));
+        stop = (op == "stop");
+    } catch (const std::exception& e) {
+        // B1: a malformed control line fails its request. The handlers check
+        // their required fields, this is the backstop for anything they miss;
+        // letting the exception escape would terminate the whole runtime (the
+        // control plane is reachable from MQTT).
+        reply(req, false, Json(),
+              std::string("bad ") + (op.empty() ? "command" : op) + ": " + e.what());
+    }
+    return stop;
 }
 
 void Runtime::op_add(const Json& line) {
     std::string req = json_get_str(line, "req");
-    const Json& sj = line.at("stream");
     std::string err;
-    try {
-        StreamSpec spec;
-        spec.index = sj.at("index").get<uint32_t>();
-        spec.id = json_get_str(sj, "id");
-        spec.url = sj.at("url").get<std::string>();
-        spec.name = json_get_str(sj, "name");
-        spec.transport = json_get_str(sj, "transport", "tcp");
-        if (sj.contains("score_threshold") && sj.at("score_threshold").is_number())
-            spec.score_threshold = sj.at("score_threshold").get<float>();
-        auto opts = sj.find("options");
-        spec.options_json = (opts != sj.end() && !opts->is_null()) ? json_dump(*opts) : "{}";
-
-        std::shared_ptr<StreamState> s = add_stream_locked(spec, line.contains("analyzers")
-                                                                    ? line.at("analyzers")
-                                                                    : Json::array(),
-                                                           err);
-        if (!s) {
-            reply(req, false, Json(), err);
+    const Json* sj = nullptr;
+    if (!need_object(line, "stream", sj, err)) {
+        reply(req, false, Json(), err);
+        return;
+    }
+    StreamSpec spec;
+    std::string url;
+    if (!need_u32(*sj, "index", spec.index, err) ||
+        !need_string(*sj, "url", url, err)) {
+        reply(req, false, Json(), err);
+        return;
+    }
+    spec.url = url;
+    spec.id = json_get_str(*sj, "id");
+    spec.name = json_get_str(*sj, "name");
+    spec.transport = json_get_str(*sj, "transport", "tcp");
+    auto sth = sj->find("score_threshold");
+    if (sth != sj->end() && !sth->is_null()) {
+        if (!sth->is_number()) {
+            reply(req, false, Json(), "invalid field: score_threshold");
             return;
         }
-        Json applied;
-        applied["stream_index"] = spec.index;
-        reply(req, true, applied, "");
-    } catch (const std::exception& e) {
-        reply(req, false, Json(), std::string("bad add: ") + e.what());
+        spec.score_threshold = sth->get<float>();
     }
+    auto opts = sj->find("options");
+    spec.options_json = (opts != sj->end() && !opts->is_null()) ? json_dump(*opts) : "{}";
+
+    static const Json kNoAnalyzers = Json::array();
+    const Json& analyzers = line.contains("analyzers") ? line.at("analyzers") : kNoAnalyzers;
+    if (!analyzers.is_array()) {
+        reply(req, false, Json(), "invalid field: analyzers");
+        return;
+    }
+    std::shared_ptr<StreamState> s = add_stream_locked(spec, analyzers, err);
+    if (!s) {
+        reply(req, false, Json(), err);
+        return;
+    }
+    Json applied;
+    applied["stream_index"] = spec.index;
+    reply(req, true, applied, "");
 }
 
 std::shared_ptr<StreamState> Runtime::add_stream_locked(const StreamSpec& spec,
@@ -361,34 +588,40 @@ std::shared_ptr<StreamState> Runtime::add_stream_locked(const StreamSpec& spec,
     auto s = std::make_shared<StreamState>();
     s->index = spec.index;
     s->spec = spec;
+    s->track_enabled = cfg_.tracker_enabled;
     s->tracker = Tracker(cfg_.tracker);
     s->ring_cap = cfg_.snapshot_ring;
     s->metrics.record_state("starting", "");
     s->metrics.set_decode_path(src->decode_path());
     s->dev_limiter.set_max_fps(cfg_.dev.max_fps);
 
-    // Analyzers (built-ins by name; "<basename>.so" matches a configured
-    // plugin path; an absolute/relative path ending in .so is loaded).
+    // Analyzers: built-in names, or "plugin:<id>" for a plugin registered from
+    // analyzers.plugins. The name is what configure_analyzer matches against,
+    // so it is stored as given.
     for (const auto& aj : analyzers) {
-        std::string name = aj.at("name").get<std::string>();
-        std::string cfg_json =
-            aj.contains("config") ? json_dump(aj.at("config")) : "{}";
-        std::unique_ptr<Analyzer> a;
-        if (name.size() > 3 && name.rfind(".so") == name.size() - 3) {
-            std::string path = name;
-            for (const auto& p : cfg_.plugin_paths) {
-                std::string base = p.substr(p.find_last_of('/') + 1);
-                if (base == name) {
-                    path = p;
-                    break;
-                }
+        if (!aj.is_object()) {
+            err = "analyzer entry must be an object";
+            return nullptr;
+        }
+        std::string name;
+        if (!need_string(aj, "name", name, err)) return nullptr;
+        std::string cfg_json = "{}";
+        auto cj = aj.find("config");
+        if (cj != aj.end() && !cj->is_null()) {
+            if (!cj->is_object()) {
+                err = "analyzer config must be an object";
+                return nullptr;
             }
-            a = load_plugin_analyzer(path, err);
-            if (!a) return nullptr;
-            name = name.substr(0, name.size() - 3);
-        } else {
-            a = create_analyzer(name, err);
-            if (!a) return nullptr;
+            cfg_json = json_dump(*cj);
+        }
+        std::unique_ptr<Analyzer> a = make_stream_analyzer(name, err);
+        if (!a) return nullptr;
+        // §6.2: with tracker.enabled=false detections arrive as track_id=0
+        // single-frame tracks, so an analyzer that needs a track lifecycle
+        // cannot be enabled on this runtime.
+        if (!s->track_enabled && a->needs_tracks()) {
+            err = name + " requires tracks (tracker.enabled=false)";
+            return nullptr;
         }
         // §6.2.5: pose_angle-class analyzers need a model with keypoints
         // (checked after configure: min_keypoints depends on the joints).
@@ -436,10 +669,7 @@ void Runtime::source_thread(std::shared_ptr<StreamState> s,
     FrameBuf f;
     for (;;) {
         if (stopping_) break;
-        {
-            std::lock_guard<std::mutex> hlk(s->holder_mu);
-            if (s->removing) break;
-        }
+        if (s->removing) break;
         int r = src->read(f, 100);
         if (r == 1) {
             f.stream_index = s->index;
@@ -470,10 +700,7 @@ void Runtime::source_thread(std::shared_ptr<StreamState> s,
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             std::string err;
             while (!stopping_) {
-                {
-                    std::lock_guard<std::mutex> hlk(s->holder_mu);
-                    if (s->removing) return;
-                }
+                if (s->removing) return;
                 if (src->open(err)) break;
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
@@ -483,7 +710,12 @@ void Runtime::source_thread(std::shared_ptr<StreamState> s,
 
 void Runtime::op_remove(const Json& line) {
     std::string req = json_get_str(line, "req");
-    uint32_t idx = line.at("stream_index").get<uint32_t>();
+    uint32_t idx = 0;
+    std::string err;
+    if (!need_u32(line, "stream_index", idx, err)) {
+        reply(req, false, Json(), err);
+        return;
+    }
     std::shared_ptr<StreamState> s;
     {
         std::lock_guard<std::mutex> lk(streams_mu_);
@@ -493,13 +725,50 @@ void Runtime::op_remove(const Json& line) {
             return;
         }
         s = it->second;
-        streams_.erase(it);
-        // Signal the source thread to stop, then join it.
+    }
+    // 1) Stop new work on this stream. `removing` is atomic, so this does not
+    //    wait for the frame lock a context thread holds for a whole frame.
+    s->removing = true;
+    s->holder_cv.notify_all();
+    // 2) Wait for the in-flight frame, if any, to finish. The pool skips
+    //    removing streams both when claiming and before each batch item, so
+    //    this is the last frame that can touch the stream. Reporting success
+    //    after a timeout would be wrong twice over: the peer would see frames
+    //    and events after the "stopped" record, and a later add() reusing the
+    //    index would have them attributed to the new stream.
+    //
+    //    try_lock rather than wait_for: the holder keeps holder_mu for the
+    //    whole frame, so blocking on the lock would silently wait for the
+    //    frame and then report success — the timeout would never be observed.
+    const double deadline = now_s() + kRemoveBusyTimeoutMs / 1000.0;
+    bool released = false;
+    for (;;) {
         {
-            std::lock_guard<std::mutex> hlk(s->holder_mu);
-            s->removing = true;
-            s->holder_cv.notify_all();
+            std::unique_lock<std::mutex> hlk(s->holder_mu, std::try_to_lock);
+            if (hlk.owns_lock() && !s->busy) {
+                released = true;
+                break;
+            }
         }
+        if (now_s() >= deadline) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!released) {
+        // The reply says failed, so the stream must still be there and usable.
+        s->removing = false;
+        reply(req, false, Json(),
+              "remove timeout: stream " + std::to_string(idx) + " still busy");
+        return;
+    }
+    // 3) Detach the stream and join its source thread.
+    {
+        std::lock_guard<std::mutex> lk(streams_mu_);
+        auto it = streams_.find(idx);
+        if (it == streams_.end() || it->second != s) {
+            reply(req, false, Json(), "no stream " + std::to_string(idx));
+            return;
+        }
+        streams_.erase(it);
         for (auto tt = source_threads_.begin(); tt != source_threads_.end(); ++tt) {
             if (tt->first == idx) {
                 if (tt->second.joinable()) tt->second.join();
@@ -507,11 +776,6 @@ void Runtime::op_remove(const Json& line) {
                 break;
             }
         }
-    }
-    // Wait until no context thread holds this stream (busy set release).
-    {
-        std::unique_lock<std::mutex> hlk(s->holder_mu);
-        s->holder_cv.wait_for(hlk, std::chrono::seconds(2), [&] { return !s->busy; });
     }
     emit_stream_state(s, "stopped", "");
     Json applied;
@@ -521,36 +785,72 @@ void Runtime::op_remove(const Json& line) {
 
 void Runtime::op_set_threshold(const Json& line) {
     std::string req = json_get_str(line, "req");
-    auto s = stream(line.at("stream_index").get<uint32_t>());
-    if (!s) {
-        reply(req, false, Json(), "no stream");
+    uint32_t idx = 0;
+    double value = 0.0;
+    std::string err;
+    if (!need_u32(line, "stream_index", idx, err) ||
+        !need_number(line, "value", value, err)) {
+        reply(req, false, Json(), err);
         return;
     }
-    float value = line.at("value").get<float>();
+    auto s = stream(idx);
+    if (!s) {
+        reply(req, false, Json(), "no stream " + std::to_string(idx));
+        return;
+    }
+    float applied_value = 0.0f;
+    bool applied = false;
     {
         std::unique_lock<std::mutex> lk(s->ctl_mu);
-        s->pending_score = value;
-        // Applied by the holder thread before the next frame (§6.3).
-        bool applied = s->ctl_cv.wait_for(lk, std::chrono::seconds(1),
-                                          [&] { return !s->pending_score.has_value(); });
-        (void)applied;
+        s->pending_score = static_cast<float>(value);
+        // Applied by the holder thread before the next frame (§6.3). The
+        // result and the value are read under ctl_mu, the same lock the holder
+        // writes spec.score_threshold with, so the reply cannot carry a stale
+        // or racy value.
+        applied = s->ctl_cv.wait_for(lk, std::chrono::milliseconds(kControlApplyTimeoutMs),
+                                     [&] { return !s->pending_score.has_value(); });
+        if (applied) {
+            applied_value = s->spec.score_threshold;
+        } else {
+            // No frame within the window (idle or reconnecting stream): drop
+            // the pending value so the failed reply matches the real state.
+            s->pending_score.reset();
+        }
     }
-    Json applied;
-    applied["stream_index"] = s->index;
-    applied["value"] = s->spec.score_threshold;
-    reply(req, true, applied, "");
+    if (!applied) {
+        reply(req, false, Json(), "stream has no frames; threshold not applied");
+        return;
+    }
+    Json applied_json;
+    applied_json["stream_index"] = s->index;
+    applied_json["value"] = applied_value;
+    reply(req, true, applied_json, "");
 }
 
 void Runtime::op_configure_analyzer(const Json& line) {
     std::string req = json_get_str(line, "req");
-    auto s = stream(line.at("stream_index").get<uint32_t>());
-    if (!s) {
-        reply(req, false, Json(), "no stream");
+    uint32_t idx = 0;
+    std::string name;
+    std::string err;
+    if (!need_u32(line, "stream_index", idx, err) ||
+        !need_string(line, "name", name, err)) {
+        reply(req, false, Json(), err);
         return;
     }
-    std::string name = line.at("name").get<std::string>();
-    std::string cfg_json =
-        line.contains("config") ? json_dump(line.at("config")) : "{}";
+    auto s = stream(idx);
+    if (!s) {
+        reply(req, false, Json(), "no stream " + std::to_string(idx));
+        return;
+    }
+    std::string cfg_json = "{}";
+    auto cj = line.find("config");
+    if (cj != line.end() && !cj->is_null()) {
+        if (!cj->is_object()) {
+            reply(req, false, Json(), "invalid field: config");
+            return;
+        }
+        cfg_json = json_dump(*cj);
+    }
     {
         std::unique_lock<std::mutex> lk(s->ctl_mu);
         if (s->pending_cfg.has_value() && !s->pending_cfg->done) {
@@ -600,20 +900,27 @@ void Runtime::op_configure_analyzer(const Json& line) {
 
 void Runtime::op_snapshot(const Json& line) {
     std::string req = json_get_str(line, "req");
-    auto s = stream(line.at("stream_index").get<uint32_t>());
-    if (!s) {
-        reply(req, false, Json(), "no stream");
+    uint32_t idx = 0, track_id = 0;
+    uint64_t seq = 0;
+    bool crop = true;
+    int max_side = 640;
+    std::string err;
+    if (!need_u32(line, "stream_index", idx, err) ||
+        !opt_u64(line, "seq", 0, seq, err) ||
+        !opt_u32(line, "track_id", 0, track_id, err) ||
+        !opt_bool(line, "crop", true, crop, err) ||
+        !opt_int(line, "max_side", 640, max_side, err)) {
+        reply(req, false, Json(), err);
         return;
     }
-    uint64_t seq = line.contains("seq") ? line.at("seq").get<uint64_t>() : 0;
-    uint32_t track_id =
-        line.contains("track_id") ? line.at("track_id").get<uint32_t>() : 0;
-    bool crop = !line.contains("crop") || line.at("crop").get<bool>();
-    int max_side = line.contains("max_side") ? line.at("max_side").get<int>() : 640;
+    auto s = stream(idx);
+    if (!s) {
+        reply(req, false, Json(), "no stream " + std::to_string(idx));
+        return;
+    }
 
     std::vector<uint8_t> jpeg;
     int w = 0, h = 0;
-    std::string err;
     bool ok = false;
     uint64_t used_seq = 0;
     {
@@ -700,12 +1007,30 @@ std::shared_ptr<StreamState> Runtime::stream(uint32_t index) {
 
 // ---- fd serving ----
 
-bool write_all_fd(int fd, const uint8_t* data, size_t len) {
+bool write_all_fd(int fd, const uint8_t* data, size_t len,
+                  const std::function<bool()>& cancel, int deadline_ms) {
+    // The send timeout, not MSG_DONTWAIT, is what makes this cancellable: on
+    // macOS a unix-domain send() whose peer has stopped reading blocks even
+    // with MSG_DONTWAIT set, whereas SO_SNDTIMEO returns EAGAIN after the
+    // timeout. The timeout bounds a single send() call, so the loop gets back
+    // to the cancel predicate and the deadline every 50 ms. ENOTSOCK (a
+    // non-socket fd) is left alone; its send() then fails on its own.
+    constexpr int kSendTimeoutMs = 50;
+    struct timeval tv{};
+    tv.tv_sec = 0;
+    tv.tv_usec = kSendTimeoutMs * 1000;
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    const double deadline = deadline_ms > 0 ? now_s() + deadline_ms / 1000.0 : 0.0;
     size_t off = 0;
     while (off < len) {
+        if (cancel && cancel()) return false;
+        if (deadline > 0.0 && now_s() >= deadline) return false;
         ssize_t n = ::send(fd, data + off, len - off, 0);
         if (n < 0) {
             if (errno == EINTR) continue;
+            // Timed out mid-write: re-check cancel/deadline and resume.
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
             return false;
         }
         if (n == 0) return false;

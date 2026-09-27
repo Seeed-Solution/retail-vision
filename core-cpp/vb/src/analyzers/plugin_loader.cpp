@@ -4,9 +4,11 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "vb/analyzer.h"
+#include "vb/runtime.h"  // load_plugin_api / validate_plugin_api / make_plugin_analyzer
 #include "vb/vb_analyzer_abi.h"
 
 #include "count_threshold.h"
@@ -35,11 +37,12 @@ void emit_cb(void* sink, const char* type, uint32_t track_id, const char* fields
 
 class PluginAnalyzer : public Analyzer {
 public:
-    PluginAnalyzer(void* handle, const vb_analyzer_api* api)
-        : handle_(handle), api_(api) {}
+    // `handle` owns the dlopen reference: the library stays loaded while any
+    // instance (or the runtime's plugin registry) still holds a copy.
+    PluginAnalyzer(std::shared_ptr<void> handle, const vb_analyzer_api* api)
+        : handle_(std::move(handle)), api_(api) {}
     ~PluginAnalyzer() override {
         if (self_) api_->destroy(self_);
-        if (handle_) dlclose(handle_);
     }
 
     const char* name() const override { return api_->name ? api_->name : "plugin"; }
@@ -114,17 +117,63 @@ public:
     }
 
 private:
-    void* handle_ = nullptr;
+    std::shared_ptr<void> handle_;
     const vb_analyzer_api* api_ = nullptr;
     void* self_ = nullptr;
 };
 
 }  // namespace
 
-std::unique_ptr<Analyzer> load_plugin_analyzer(const std::string& so_path, std::string& err) {
+bool validate_plugin_api(const vb_analyzer_api* api, std::string& err) {
+    // api->abi was checked before this call; everything else in the table is
+    // validated here so a plugin that leaves a mandatory callback null is
+    // rejected at load time instead of crashing the first frame it runs on.
+    if (!api->create) {
+        err = "plugin api: create is null";
+        return false;
+    }
+    if (!api->destroy) {
+        err = "plugin api: destroy is null";
+        return false;
+    }
+    if (!api->on_frame) {
+        err = "plugin api: on_frame is null";
+        return false;
+    }
+    if (!api->on_track_removed) {
+        err = "plugin api: on_track_removed is null";
+        return false;
+    }
+    if (!api->name || api->name[0] == '\0') {
+        err = "plugin api: name is empty";
+        return false;
+    }
+    if (api->attr_count > 0 && !api->attr_names) {
+        err = "plugin api: attr_names is null with attr_count " +
+              std::to_string(api->attr_count);
+        return false;
+    }
+    // The declared attributes have to fit VBR1's attr_per_det (u8) and the
+    // hello attribute list; a plugin asking for more can never be encoded.
+    // (attr_names is a bare pointer in the ABI, so its length cannot be
+    // checked from here without reading past the end of the array.)
+    if (api->attr_count > 255) {
+        err = "plugin api: attr_count " + std::to_string(api->attr_count) +
+              " exceeds the 255 cap of VBR1";
+        return false;
+    }
+    return true;
+}
+
+std::shared_ptr<void> load_plugin_api(const std::string& so_path,
+                                      const vb_analyzer_api** api,
+                                      std::string& err) {
     void* handle = dlopen(so_path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
-        err = std::string("plugin load failed: ") + (dlerror() ? dlerror() : so_path);
+        // A second dlerror() call may return nullptr (the error is consumed by
+        // the first read), which would build std::string(nullptr).
+        const char* derr = dlerror();
+        err = std::string("plugin load failed: ") + (derr ? derr : so_path.c_str());
         return nullptr;
     }
     dlerror();
@@ -132,18 +181,37 @@ std::unique_ptr<Analyzer> load_plugin_analyzer(const std::string& so_path, std::
         dlsym(handle, "vb_analyzer_entry"));
     const char* derr = dlerror();
     if (!entry || derr) {
-        err = std::string("plugin has no vb_analyzer_entry: ") + (derr ? derr : so_path);
+        err = std::string("plugin has no vb_analyzer_entry: ") + (derr ? derr : so_path.c_str());
         dlclose(handle);
         return nullptr;
     }
-    const vb_analyzer_api* api = entry();
-    if (!api || api->abi != VB_ANALYZER_ABI) {
+    const vb_analyzer_api* table = entry();
+    if (!table || table->abi != VB_ANALYZER_ABI) {
         err = "plugin abi mismatch: expected " + std::to_string(VB_ANALYZER_ABI) + ", got " +
-              (api ? std::to_string(api->abi) : std::string("null"));
+              (table ? std::to_string(table->abi) : std::string("null"));
         dlclose(handle);
         return nullptr;
     }
-    return std::make_unique<PluginAnalyzer>(handle, api);
+    std::string api_err;
+    if (!validate_plugin_api(table, api_err)) {
+        err = so_path + ": " + api_err;
+        dlclose(handle);
+        return nullptr;
+    }
+    *api = table;
+    return std::shared_ptr<void>(handle, [](void* h) { dlclose(h); });
+}
+
+std::unique_ptr<Analyzer> make_plugin_analyzer(std::shared_ptr<void> handle,
+                                               const vb_analyzer_api* api) {
+    return std::make_unique<PluginAnalyzer>(std::move(handle), api);
+}
+
+std::unique_ptr<Analyzer> load_plugin_analyzer(const std::string& so_path, std::string& err) {
+    const vb_analyzer_api* api = nullptr;
+    std::shared_ptr<void> handle = load_plugin_api(so_path, &api, err);
+    if (!handle) return nullptr;
+    return make_plugin_analyzer(std::move(handle), api);
 }
 
 std::unique_ptr<Analyzer> create_analyzer(const std::string& name, std::string& err) {

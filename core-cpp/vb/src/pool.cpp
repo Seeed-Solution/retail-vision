@@ -8,10 +8,33 @@
 //    remove waits until the stream is no longer busy before destroying it.
 #include <mutex>
 #include <algorithm>
+#include <cstring>
 
 #include "pool.h"
 
 namespace vb {
+
+bool vbr1_counts_ok(size_t kpt_per_det, size_t attr_per_det, std::string& err) {
+    if (kpt_per_det > 255) {
+        err = "keypoint count " + std::to_string(kpt_per_det) +
+              " exceeds the 255 cap of VBR1";
+        return false;
+    }
+    if (attr_per_det > 255) {
+        err = "attribute count " + std::to_string(attr_per_det) +
+              " exceeds the 255 cap of VBR1";
+        return false;
+    }
+    return true;
+}
+
+void interleave_attrs(const float* scratch, size_t n_tracks, size_t n_attr,
+                      size_t total_attrs, size_t attr_off, float* out) {
+    for (size_t t = 0; t < n_tracks; ++t) {
+        std::memcpy(out + t * total_attrs + attr_off, scratch + t * n_attr,
+                    n_attr * sizeof(float));
+    }
+}
 
 void ContextPool::start() {
     for (auto& ctx : rt_->contexts_) {
@@ -57,8 +80,11 @@ void ContextPool::worker(InferenceContext* ctx) {
             for (size_t k = 0; k < n && batch.size() < static_cast<size_t>(rt_->max_batch_);
                  ++k) {
                 const std::shared_ptr<StreamState>& s = snapshot[(start + k) % n];
-                std::lock_guard<std::mutex> hlk(s->holder_mu);
-                if (s->busy || s->removing) continue;
+                // try_lock: one stream that is stuck in a long frame must not
+                // hold up the streams after it in the cursor order. A busy
+                // (or being-removed) stream is simply skipped this round.
+                std::unique_lock<std::mutex> hlk(s->holder_mu, std::try_to_lock);
+                if (!hlk.owns_lock() || s->busy || s->removing) continue;
                 FrameBuf f;
                 if (!s->latest.take(f)) continue;
                 s->busy = true;
@@ -73,7 +99,15 @@ void ContextPool::worker(InferenceContext* ctx) {
             cv_.wait_for(lk, std::chrono::milliseconds(1));
             continue;
         }
-        for (size_t i = 0; i < batch.size(); ++i) process(batch[i], frames[i], ctx);
+        for (size_t i = 0; i < batch.size(); ++i) {
+            // A remove() may have marked this stream after the batch was
+            // claimed but before its turn: the removal is waiting on this
+            // stream's busy flag, so skipping keeps frames and events of a
+            // stopped stream from appearing after the remove reply (and from
+            // being attributed to a later stream that reuses the index).
+            if (batch[i]->removing) continue;
+            process(batch[i], frames[i], ctx);
+        }
         // Release the busy set.
         for (auto& s : batch) {
             std::lock_guard<std::mutex> hlk(s->holder_mu);
@@ -129,14 +163,44 @@ void ContextPool::process(const std::shared_ptr<StreamState>& s, FrameBuf& f,
     // §6.12: dev-mode raw tensor passthrough (VBT1), no-op unless enabled.
     rt_->maybe_send_dev_tensors(*s, f, res, ctx);
 
+    // §6.6/§6.2: with tracker.enabled=false no tracking runs; this frame's
+    // detections are wrapped as track_id=0, hits=1, misses=0 tracks so the
+    // analyzer chain still sees them. Analyzers that need a track lifecycle
+    // were rejected at add().
+    std::vector<Track> untracked;
     std::vector<uint32_t> removed;
-    const std::vector<Track>& alive =
-        s->tracker.update(res.dets, res.kpts, f.t_mono_s, removed);
+    const std::vector<Track>* alive_ptr = nullptr;
+    if (s->track_enabled) {
+        alive_ptr = &s->tracker.update(res.dets, res.kpts, f.t_mono_s, removed);
+    } else {
+        untracked.reserve(res.dets.size());
+        for (const auto& d : res.dets) {
+            Track t;
+            t.track_id = 0;
+            t.det = d;
+            t.det.track_id = 0;
+            if (d.kpt_count > 0 && d.kpt_offset + d.kpt_count <= res.kpts.size()) {
+                t.kpts.assign(res.kpts.begin() + d.kpt_offset,
+                              res.kpts.begin() + d.kpt_offset + d.kpt_count);
+            }
+            t.hits = 1;
+            t.misses = 0;
+            untracked.push_back(std::move(t));
+        }
+        alive_ptr = &untracked;
+    }
+    const std::vector<Track>& alive = *alive_ptr;
+    const size_t n_tracks = alive.size();
 
-    // Analyzer chain (per-track float attributes + events).
+    // Analyzer chain (per-track float attributes + events). The VBR1 attribute
+    // block is [track][attribute] with the summed span as its stride (§6.3),
+    // while each analyzer writes its own contiguous per-track block: give every
+    // analyzer a private buffer and interleave afterwards, otherwise two
+    // analyzers' values land in each other's slots.
     size_t total_attrs = 0;
     for (auto& a : s->analyzers) total_attrs += a->attr_count();
-    std::vector<float> attrs(alive.size() * total_attrs, 0.0f);
+    std::vector<float> attrs(n_tracks * total_attrs, 0.0f);
+    std::vector<float> scratch;
     FrameMeta meta;
     meta.stream_index = s->index;
     meta.seq = f.seq;
@@ -146,9 +210,16 @@ void ContextPool::process(const std::shared_ptr<StreamState>& s, FrameBuf& f,
     std::vector<AnalyzerEvent> events;
     size_t attr_off = 0;
     for (auto& a : s->analyzers) {
-        float* dst = total_attrs ? attrs.data() + attr_off : nullptr;
-        a->on_frame(meta, alive, dst, events);
-        attr_off += a->attr_count();
+        const size_t n_attr = a->attr_count();
+        if (n_attr == 0) {
+            a->on_frame(meta, alive, nullptr, events);
+        } else {
+            scratch.assign(n_tracks * n_attr, 0.0f);
+            a->on_frame(meta, alive, scratch.data(), events);
+            interleave_attrs(scratch.data(), n_tracks, n_attr, total_attrs, attr_off,
+                             attrs.data());
+        }
+        attr_off += n_attr;
         emit_events(*s, meta, events, a->name());
         events.clear();
     }
@@ -160,7 +231,15 @@ void ContextPool::process(const std::shared_ptr<StreamState>& s, FrameBuf& f,
         }
     }
 
-    encode_frame_record(*s, f, res, alive, attrs, total_attrs);
+    std::string enc_err;
+    if (!encode_frame_record(*s, f, res, alive, attrs, total_attrs, enc_err)) {
+        // §6.3: kpt_per_det/attr_per_det are u8 fields. A count above 255
+        // cannot be encoded truthfully, and sending the full payload with the
+        // clamped count would desynchronise the receiver on the next record,
+        // so the frame is dropped and the reason is reported through the
+        // stream state instead.
+        s->metrics.record_state("error", enc_err);
+    }
 
     // Snapshot ring (host RGB copy of the newest frames + track boxes).
     if (s->ring_cap > 0 && f.host && f.fmt == PixFmt::RGB888) {
@@ -217,11 +296,22 @@ void ContextPool::emit_events(StreamState& s, const FrameMeta& m,
     }
 }
 
-void ContextPool::encode_frame_record(StreamState& s, const FrameBuf& f,
+bool ContextPool::encode_frame_record(StreamState& s, const FrameBuf& f,
                                       const DetectionResult& res,
                                       const std::vector<Track>& alive,
                                       const std::vector<float>& attrs,
-                                      size_t attr_total) {
+                                      size_t attr_total, std::string& err) {
+    // Per-detection counts are u8 in VBR1; refuse rather than emit a record
+    // whose declared and actual lengths disagree (B: record-boundary break).
+    size_t kpt_n = 0;
+    for (auto& t : alive) {
+        if (t.kpts.empty()) continue;
+        if (kpt_n == 0) kpt_n = t.kpts.size();
+        else if (t.kpts.size() != kpt_n) kpt_n = static_cast<size_t>(-1);
+    }
+    if (kpt_n == static_cast<size_t>(-1)) kpt_n = 0;  // mixed per-track counts: send none
+    if (!vbr1_counts_ok(kpt_n, attr_total, err)) return false;
+
     WireFrameRec r;
     r.stream_index = s.index;
     r.seq = f.seq;
@@ -239,14 +329,7 @@ void ContextPool::encode_frame_record(StreamState& s, const FrameBuf& f,
         (std::chrono::duration<double>(
              std::chrono::steady_clock::now().time_since_epoch()).count() -
          f.t_mono_s) * 1000.0);
-    size_t kpt_n = 0;
-    for (auto& t : alive) {
-        if (t.kpts.empty()) continue;
-        if (kpt_n == 0) kpt_n = t.kpts.size();
-        else if (t.kpts.size() != kpt_n) kpt_n = static_cast<size_t>(-1);
-    }
-    if (kpt_n == static_cast<size_t>(-1)) kpt_n = 0;
-    r.kpt_per_det = static_cast<uint8_t>(std::min<size_t>(255, kpt_n));
+    r.kpt_per_det = static_cast<uint8_t>(kpt_n);
     for (auto& t : alive) {
         WireDet wd;
         wd.cx = t.det.cx;
@@ -265,12 +348,15 @@ void ContextPool::encode_frame_record(StreamState& s, const FrameBuf& f,
             }
         }
     }
-    r.attr_per_det = static_cast<uint8_t>(std::min<size_t>(255, attr_total));
+    r.attr_per_det = static_cast<uint8_t>(attr_total);
     r.attrs = attrs;
     std::vector<uint8_t> rec;
-    wire_encode_vbr1(r, rec);
+    // The encoder refuses a record whose vectors disagree with the declared
+    // per-detection counts; report why instead of dropping the frame silently.
+    if (!wire_encode_vbr1(r, rec, &err)) return false;
     rt_->writer_.push_frame(std::move(rec));
     if (rt_->on_frame_rec) rt_->on_frame_rec(r);
+    return true;
 }
 
 }  // namespace vb
