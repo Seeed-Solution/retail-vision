@@ -198,6 +198,20 @@ if(VB_TESTS)
     add_test(NAME count_pose COMMAND test_count_pose
         ${CMAKE_CURRENT_SOURCE_DIR}/../../contracts/fixtures/vb/analyzers)
 
+    add_executable(test_out tests/test_out.cpp)
+    target_link_libraries(test_out PRIVATE vb_core)
+    add_test(NAME out COMMAND test_out)
+
+    add_executable(test_runtime tests/test_runtime.cpp)
+    target_link_libraries(test_runtime PRIVATE vb_core)
+    add_test(NAME runtime COMMAND test_runtime
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../contracts/fixtures/vb)
+
+    add_executable(test_sources tests/test_sources.cpp)
+    target_link_libraries(test_sources PRIVATE vb_core)
+    add_test(NAME sources COMMAND test_sources
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../contracts/fixtures/vb)
+
     add_executable(test_decoder tests/test_decoder.cpp)
     target_link_libraries(test_decoder PRIVATE vb_core)
     add_test(NAME decoder COMMAND test_decoder
