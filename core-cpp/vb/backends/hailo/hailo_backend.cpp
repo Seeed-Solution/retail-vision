@@ -8,10 +8,21 @@
 // hands the dequantised outputs to the §6.11 yolo_pose decoder as TensorView.
 //
 // Output layouts (Hailo Model Zoo yolov8s_pose, one set per stride): box
-// [64,H,W] UINT8, score [1,H,W] UINT8, kpt [51,H,W] UINT16. The shared split
-// decoder consumes box 4*reg_max=64, cls nc=1, kpt 3*keypoints=51 — the
-// dequantiser below only converts element width; it never reorders channels,
-// so the kpt channel order (j*3: x, y, conf) is the decoder's documented one.
+// [H*W][64] UINT8, score [H*W][1] UINT8, kpt [H*W][51] UINT16 — cell-major,
+// features innermost (the HEF reports them as FCR/NHWC(20x20x64) etc.). The
+// shared split decoder consumes planar [C][H][W] with box 4*reg_max=64, cls
+// nc=1 and kpt 3*keypoints=51 (channel j*3: x, y, conf), so the dequantiser
+// below transposes as it converts width.
+//
+// The cell-major order is not inferred from the vstream names: both shipped
+// decoders for this HEF index it that way —
+// fall platforms/rpi-hailo/src/hailo_pose_decoder.cpp:29-45 reads
+// `cell*64 + q*16 + n` and `cell*51 + j*3`, and the Python reference
+// evaluation/reports/rpi-hailo8-python-vs-cpp-20260926/round1/bench_b.py:53-65
+// reshapes the same buffers as (-1, 64) and (-1, 51). Feeding the raw buffer
+// as planar made the score plane look right (one feature is layout-invariant)
+// while the box and keypoint planes decoded to garbage, which is what the
+// M2.3 parity run measured.
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -83,18 +94,25 @@ void dequantize(const std::vector<RawTensor>& tensors, FrameViews& dst) {
     dst.views.reserve(tensors.size());
     size_t off = 0;
     for (const auto& t : tensors) {
-        const size_t elems =
-            static_cast<size_t>(t.info.features) * t.info.height * t.info.width;
+        const size_t feats = static_cast<size_t>(t.info.features);
+        const size_t cells = static_cast<size_t>(t.info.height) * t.info.width;
+        const size_t elems = feats * cells;
         float* out = dst.data.data() + off;
         const float scale = t.info.qp_scale;
-        const int32_t zp = t.info.qp_zp;
+        const float zpf = static_cast<float>(t.info.qp_zp);
+        // cell-major -> planar: out[c][cell] = in[cell][c]. A one-feature head
+        // (the score plane) is unchanged by the transpose.
         if (t.info.format_type == kHailoFormatUint16) {
             const auto* in = reinterpret_cast<const uint16_t*>(t.data);
-            for (size_t i = 0; i < elems; ++i)
-                out[i] = (static_cast<float>(in[i]) - static_cast<float>(zp)) * scale;
+            for (size_t cell = 0; cell < cells; ++cell)
+                for (size_t c = 0; c < feats; ++c)
+                    out[c * cells + cell] =
+                        (static_cast<float>(in[cell * feats + c]) - zpf) * scale;
         } else {
-            for (size_t i = 0; i < elems; ++i)
-                out[i] = (static_cast<float>(t.data[i]) - static_cast<float>(zp)) * scale;
+            for (size_t cell = 0; cell < cells; ++cell)
+                for (size_t c = 0; c < feats; ++c)
+                    out[c * cells + cell] =
+                        (static_cast<float>(t.data[cell * feats + c]) - zpf) * scale;
         }
         TensorView v;
         v.data = out;

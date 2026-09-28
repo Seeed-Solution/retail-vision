@@ -210,15 +210,18 @@ LevelBytes make_level(const int dist_bins[4], int cell_a, int cell_b,
     lv.score.assign(kPlane, 0);
     lv.kpt.assign(51 * kPlane, 0);
     for (int cell : {cell_a, cell_b}) {
+        // The HEF's buffers are cell-major (features innermost): the adapter
+        // transposes them into the decoder's planar [C][H][W], so the fixture
+        // is written the way the device delivers it.
         for (int d = 0; d < 4; ++d)
-            lv.box[(static_cast<size_t>(d) * 16 + dist_bins[d]) * kPlane + cell] = 200;
+            lv.box[static_cast<size_t>(cell) * 64 + (d * 16 + dist_bins[d])] = 200;
         lv.score[cell] = 220;  // 220/255 = 0.8627
         auto put = [&](int j, float kx, float ky, float kc) {
-            lv.kpt[(static_cast<size_t>(j) * 3 + 0) * kPlane + cell] =
+            lv.kpt[static_cast<size_t>(cell) * 51 + j * 3 + 0] =
                 static_cast<uint16_t>(kx * 100.0f + 0.5f);
-            lv.kpt[(static_cast<size_t>(j) * 3 + 1) * kPlane + cell] =
+            lv.kpt[static_cast<size_t>(cell) * 51 + j * 3 + 1] =
                 static_cast<uint16_t>(ky * 100.0f + 0.5f);
-            lv.kpt[(static_cast<size_t>(j) * 3 + 2) * kPlane + cell] =
+            lv.kpt[static_cast<size_t>(cell) * 51 + j * 3 + 2] =
                 static_cast<uint16_t>(kc * 100.0f + 0.5f);
         };
         put(0, kx0, ky0, kc0);
@@ -350,18 +353,21 @@ static void test_stub_backend_end_to_end() {
     const Detection* b = find_det(results[0], 156.0f / 640, 52.0f / 640);
     CHECK(b != nullptr);
 
-    // Keypoints: shared decoder form (2*k + g - 0.5) * stride.
-    // det a (cell 10,10), kpt0: (2*3.0 + 10 - 0.5)*8 = 124; kpt1: 108.
-    CHECK_NEAR(results[0].kpts[a->kpt_offset + 0].x, 124.0f / 640, eps);
-    CHECK_NEAR(results[0].kpts[a->kpt_offset + 0].y, 116.0f / 640, eps);
+    // Keypoints: shared decoder form (2*k + g) * stride (the Ultralytics raw
+    // head; ONNX constants Constant_23 = [0,1,2,...] and the box anchor
+    // Constant_13 = [0.5,1.5,...] differ by exactly 0.5, and the upstream
+    // decoders for this HEF use (stride*(2*k - 0.5) + (g + 0.5)*stride)).
+    // det a (cell 10,10), kpt0: (2*3.0 + 10)*8 = 128; kpt1: 112/136.
+    CHECK_NEAR(results[0].kpts[a->kpt_offset + 0].x, 128.0f / 640, eps);
+    CHECK_NEAR(results[0].kpts[a->kpt_offset + 0].y, 120.0f / 640, eps);
     CHECK_NEAR(results[0].kpts[a->kpt_offset + 0].conf,
                1.0f / (1.0f + std::exp(-0.9f)), 1e-4);
-    CHECK_NEAR(results[0].kpts[a->kpt_offset + 1].x, 108.0f / 640, eps);
-    CHECK_NEAR(results[0].kpts[a->kpt_offset + 1].y, 132.0f / 640, eps);
+    CHECK_NEAR(results[0].kpts[a->kpt_offset + 1].x, 112.0f / 640, eps);
+    CHECK_NEAR(results[0].kpts[a->kpt_offset + 1].y, 136.0f / 640, eps);
     CHECK_NEAR(results[0].kpts[a->kpt_offset + 1].conf, 0.5f, 1e-4);
-    // det b (cell 20,5), kpt0: (2*3.0 + 20 - 0.5)*8 = 204; (2*2.5 + 5 - 0.5)*8 = 76.
-    CHECK_NEAR(results[0].kpts[b->kpt_offset + 0].x, 204.0f / 640, eps);
-    CHECK_NEAR(results[0].kpts[b->kpt_offset + 0].y, 76.0f / 640, eps);
+    // det b (cell 20,5), kpt0: (2*3.0 + 20)*8 = 208; (2*2.5 + 5)*8 = 80.
+    CHECK_NEAR(results[0].kpts[b->kpt_offset + 0].x, 208.0f / 640, eps);
+    CHECK_NEAR(results[0].kpts[b->kpt_offset + 0].y, 80.0f / 640, eps);
 
     // Both frame slots decoded (the stub mirrors its tensors per slot).
     CHECK(find_det(results[1], 76.0f / 640, 92.0f / 640) != nullptr);
