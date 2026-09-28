@@ -280,11 +280,16 @@ private:
     uint64_t next_seq_ = 0;
 };
 
+struct GstInit {
+    GstInit() { gst_init(nullptr, nullptr); }
+};
+
 }  // namespace
 
 std::unique_ptr<FrameSource> make_hailo_source(const StreamSpec& s,
                                                const hailo_source::RtspSettings& rtsp,
                                                std::string& err) {
+    static GstInit init;  // idempotent
     err.clear();
     auto src = std::make_unique<HailoSource>(s, rtsp);
     // Fail add-time for a rejected url or an unavailable element without
