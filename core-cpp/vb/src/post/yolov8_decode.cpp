@@ -18,7 +18,7 @@
 //       cls   [nc, H, W]          objectness/class plane
 //       kpt   [3*keypoints, H, W] x, y in grid units + confidence
 //     Keypoints follow the Ultralytics raw-head layout
-//     x = (2*px + gx - 0.5) * stride (fall-detection
+//     x = (2*px + gx) * stride (Ultralytics; fall-detection
 //     platforms/rknn/cpp/rknn_postprocess.cpp:124-128, and
 //     platforms/rpi-hailo/src/hailo_pose_decoder.cpp:38-42 for the same head).
 //   B (single end-to-end export [5+3K, N] or [N, 5+3K]; fall-detection
@@ -620,9 +620,17 @@ private:
                             !std::isfinite(kc))
                             finite = false;
                         else
+                            // Ultralytics decodes keypoints as
+                            //   (2*k + (anchor - 0.5)) * stride  with anchor = g + 0.5
+                            // i.e. (2*k + g) * stride — the same cell origin the box
+                            // path above uses (gx + 0.5). Written with g - 0.5 the
+                            // keypoints land half a cell short (4/8/16 px at stride
+                            // 8/16/32); confirmed against the ONNX graph constants:
+                            // the box anchor is [0.5,1.5,...] and the kpt addend is
+                            // [0,1,2,...], always 0.5 apart.
                             out.kpts.push_back(Keypoint{
-                                (2.0f * kx + gx - 0.5f) * stride / model_w,
-                                (2.0f * ky + gy - 0.5f) * stride / model_h,
+                                (2.0f * kx + gx) * stride / model_w,
+                                (2.0f * ky + gy) * stride / model_h,
                                 sigmoid(kc)});
                     }
                     if (!finite) {  // drop the whole candidate

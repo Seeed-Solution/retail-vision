@@ -493,11 +493,14 @@ int main(int argc, char** argv) {
         CHECK_NEAR(hi.h, 1.0, 1e-5);
         CHECK(hi.class_id == 0);
         CHECK(hi.kpt_count == 2);
-        CHECK_NEAR(out.kpts[hi.kpt_offset + 0].x, 0.75, 1e-5);
-        CHECK_NEAR(out.kpts[hi.kpt_offset + 0].y, 0.5, 1e-5);
+        // Ultralytics keypoint form is (2*k + g)*stride — the same cell origin
+        // the box path uses (gx + 0.5). Written with g - 0.5 these were one half
+        // cell short (4 px at stride 8): 0.75/0.5 and 0.5/1.0 before the fix.
+        CHECK_NEAR(out.kpts[hi.kpt_offset + 0].x, 1.0, 1e-5);
+        CHECK_NEAR(out.kpts[hi.kpt_offset + 0].y, 0.75, 1e-5);
         CHECK_NEAR(out.kpts[hi.kpt_offset + 0].conf, 0.5, 1e-5);
-        CHECK_NEAR(out.kpts[hi.kpt_offset + 1].x, 0.5, 1e-5);
-        CHECK_NEAR(out.kpts[hi.kpt_offset + 1].y, 1.0, 1e-5);
+        CHECK_NEAR(out.kpts[hi.kpt_offset + 1].x, 0.75, 1e-5);
+        CHECK_NEAR(out.kpts[hi.kpt_offset + 1].y, 1.25, 1e-5);
         CHECK_NEAR(out.kpts[hi.kpt_offset + 1].conf, 0.8, 1e-5);
         CHECK(out.dets[1].kpt_count == 2);
         CHECK(out.dets[1].kpt_offset == 2);
