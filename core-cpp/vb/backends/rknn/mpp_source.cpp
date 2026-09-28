@@ -15,6 +15,9 @@
 #include <cstring>
 #include <mutex>
 
+#include <sys/mman.h>
+#include <unistd.h>
+
 #include <gst/allocators/gstdmabuf.h>
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
@@ -127,6 +130,14 @@ public:
         if (playing_) return true;
         if (!pipeline_ && !build_locked(err)) return false;
         if (!start_locked(err)) {
+            // The add reply carries this, but neither --parity nor --standalone
+            // prints replies, and "add failed" alone does not say why the
+            // hardware pipeline never reached PLAYING. Deduped: the runtime
+            // retries open() until its add deadline.
+            if (err != last_open_err_) {
+                last_open_err_ = err;
+                std::fprintf(stderr, "rknn source: open failed: %s\n", err.c_str());
+            }
             close_locked();
             return false;
         }
@@ -185,12 +196,36 @@ public:
         } else if (GST_VIDEO_INFO_FORMAT(&info) != GST_VIDEO_FORMAT_NV12) {
             why = "decoded buffer is not NV12";
         }
+        int w = 0;
+        int h = 0;
+        int y_stride = 0;
+        gsize y_off = 0;
+        gsize uv_off = 0;
         if (why.empty()) {
-            const int w = static_cast<int>(GST_VIDEO_INFO_WIDTH(&info));
-            const int h = static_cast<int>(GST_VIDEO_INFO_HEIGHT(&info));
-            const int y_stride = GST_VIDEO_INFO_PLANE_STRIDE(&info, 0);
-            const gsize y_off = GST_VIDEO_INFO_PLANE_OFFSET(&info, 0);
-            const gsize uv_off = GST_VIDEO_INFO_PLANE_OFFSET(&info, 1);
+            // The caps describe the picture, not the allocation. The RK MPP
+            // decoder pads the luma stride to 64 pixels (a 416-wide H.264 frame
+            // is decoded with a 448-byte row pitch) and records that only on the
+            // buffer's GstVideoMeta. Wrapping RGA with the caps-derived stride
+            // makes every row start one shear step early and puts the UV plane
+            // 32 rows short, which is what the bring-up canvas dump showed as
+            // "noise". The buffer's own meta wins whenever the element attached
+            // one; the caps-derived GstVideoInfo stays the fallback.
+            GstVideoMeta* vmeta = gst_buffer_get_video_meta(buf);
+            if (vmeta) {
+                w = static_cast<int>(vmeta->width);
+                h = static_cast<int>(vmeta->height);
+                y_stride = static_cast<int>(vmeta->stride[0]);
+                y_off = vmeta->offset[0];
+                uv_off = vmeta->n_planes > 1
+                             ? vmeta->offset[1]
+                             : static_cast<gsize>(y_stride) * static_cast<gsize>(h);
+            } else {
+                w = static_cast<int>(GST_VIDEO_INFO_WIDTH(&info));
+                h = static_cast<int>(GST_VIDEO_INFO_HEIGHT(&info));
+                y_stride = GST_VIDEO_INFO_PLANE_STRIDE(&info, 0);
+                y_off = GST_VIDEO_INFO_PLANE_OFFSET(&info, 0);
+                uv_off = GST_VIDEO_INFO_PLANE_OFFSET(&info, 1);
+            }
             if (w <= 0 || h <= 0 || w > kMppMaxDim || h > kMppMaxDim || (w % 2) || (h % 2)) {
                 why = "invalid NV12 geometry from mppvideodec";
             } else if (y_stride < w) {
@@ -228,9 +263,36 @@ public:
             return -1;
         }
 
-        const int w = static_cast<int>(GST_VIDEO_INFO_WIDTH(&info));
-        const int h = static_cast<int>(GST_VIDEO_INFO_HEIGHT(&info));
-        const int y_stride = GST_VIDEO_INFO_PLANE_STRIDE(&info, 0);
+        // Bring-up aid (VB_RK_DUMP_NV12=<path>): write the first accepted frame's
+        // decoded NV12 exactly as the DMA-BUF holds it, so the source side of the
+        // RGA call can be checked independently of the destination canvas. Off by
+        // default; never enabled by the runtime itself.
+        if (!nv12_dumped_) {
+            nv12_dumped_ = true;
+            const char* nv12_path = std::getenv("VB_RK_DUMP_NV12");
+            if (nv12_path && *nv12_path) {
+                const size_t want =
+                    static_cast<size_t>(y_stride) * static_cast<size_t>(h) * 3 / 2;
+                void* mapped = mmap(nullptr, want, PROT_READ, MAP_SHARED, fd, 0);
+                if (mapped != MAP_FAILED) {
+                    std::FILE* nf = std::fopen(nv12_path, "wb");
+                    if (nf) {
+                        std::fwrite(mapped, 1, want, nf);
+                        std::fclose(nf);
+                        std::fprintf(
+                            stderr,
+                            "rknn source: NV12 %dx%d y_stride=%d uv_off=%zu "
+                            "%zu bytes -> %s\n",
+                            w, h, y_stride, static_cast<size_t>(uv_off), want,
+                            nv12_path);
+                    }
+                    munmap(mapped, want);
+                } else {
+                    std::fprintf(stderr,
+                                 "rknn source: mmap of the NV12 buffer failed\n");
+                }
+            }
+        }
 
         uint64_t seq;
         {
@@ -451,6 +513,8 @@ private:
     uint64_t next_seq_ = 0;
     bool eos_ = false;
     bool playing_ = false;
+    bool nv12_dumped_ = false;  // VB_RK_DUMP_NV12 fires once per source
+    std::string last_open_err_;
 };
 
 struct GstInit {

@@ -189,7 +189,6 @@ public:
 
 private:
     RknnHybrid* hybrid_;
-    InputSpec input_{};  // backend.input, else decoder default
     Decoder* decoder_;
     int model_w_, model_h_;
     std::vector<float> tmp_;  // transposed-decode scratch (one context per thread)
@@ -364,6 +363,11 @@ public:
 
 private:
     std::string model_path_, sha256_, compatible_, rknn_sdk_;
+    // §6.11 backend.input: the model's own convention, resolved once here and
+    // handed to every RknnHybrid (which turns color_order into the RGA dst
+    // format). Declared on the backend, not on RknnContext: it is per-model,
+    // not per-context.
+    InputSpec input_{};
     std::vector<uint32_t> core_masks_;
     std::unique_ptr<Decoder> decoder_;
     std::vector<std::unique_ptr<RknnHybrid>> contexts_;  // outlives the contexts

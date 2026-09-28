@@ -169,6 +169,30 @@ std::unique_ptr<RknnHybrid> RknnHybrid::create(const std::string& model_path,
     // the external element type to UINT8, allowing normalization/quantization to
     // remain fused in the NPU graph.
     s.input_native.type = RKNN_TENSOR_UINT8;
+    // Bring-up aid, same switch as the canvas dump: the RGA destination buffer is
+    // wrapped with input_native.w_stride, so the unit this runtime reports
+    // (bytes vs pixels) has to be visible rather than inferred.
+    if (const char* dbg = std::getenv("VB_RK_DUMP_CANVAS"); dbg && *dbg) {
+        std::fprintf(stderr,
+                     "rknn input logical: dims=[%u,%u,%u,%u] fmt=%d type=%d "
+                     "n_elems=%u size=%u w_stride=%u h_stride=%u size_with_stride=%u\n",
+                     s.input_logical.dims[0], s.input_logical.dims[1],
+                     s.input_logical.dims[2], s.input_logical.dims[3],
+                     static_cast<int>(s.input_logical.fmt),
+                     static_cast<int>(s.input_logical.type), s.input_logical.n_elems,
+                     s.input_logical.size, s.input_logical.w_stride,
+                     s.input_logical.h_stride, s.input_logical.size_with_stride);
+        std::fprintf(stderr,
+                     "rknn input native : dims=[%u,%u,%u,%u] fmt=%d n_elems=%u "
+                     "size=%u w_stride=%u h_stride=%u size_with_stride=%u "
+                     "model=%dx%d\n",
+                     s.input_native.dims[0], s.input_native.dims[1],
+                     s.input_native.dims[2], s.input_native.dims[3],
+                     static_cast<int>(s.input_native.fmt), s.input_native.n_elems,
+                     s.input_native.size, s.input_native.w_stride,
+                     s.input_native.h_stride, s.input_native.size_with_stride,
+                     self->width_, self->height_);
+    }
     s.input_mem = rknn_create_mem(s.ctx, s.input_native.size_with_stride);
     if (!s.input_mem) {
         err = "rknn_create_mem(input) returned null";
@@ -313,13 +337,28 @@ int RknnHybrid::infer_nv12_fd(int src_fd, int src_w, int src_h, int y_stride,
     // comparison. Off by default; never enabled by the runtime itself.
     if (!dump_done_) {
         dump_done_ = true;
+        // Verbatim copy of the whole NPU input buffer (size_with_stride bytes):
+        // the tight repack below assumes a byte-per-row stride, which is exactly
+        // what the wrap has to be checked against.
+        const char* raw_path = std::getenv("VB_RK_DUMP_CANVAS_RAW");
+        if (raw_path && *raw_path && s.input_mem->virt_addr && s.input_mem->size) {
+            std::FILE* rf = std::fopen(raw_path, "wb");
+            if (rf) {
+                std::fwrite(s.input_mem->virt_addr, 1, s.input_mem->size, rf);
+                std::fclose(rf);
+                std::fprintf(stderr, "rknn: raw canvas %zu bytes -> %s\n",
+                             s.input_mem->size, raw_path);
+            }
+        }
         const char* dump_path = std::getenv("VB_RK_DUMP_CANVAS");
         if (dump_path && *dump_path) {
             const uint8_t* base = static_cast<const uint8_t*>(s.input_mem->virt_addr);
             std::vector<uint8_t> tight(static_cast<size_t>(width_) * height_ * 3);
             for (int y = 0; y < height_; ++y)
+                // dst_stride is the RGA wrap stride, in pixels; the canvas is
+                // three bytes per pixel, so the row offset is stride * 3.
                 std::memcpy(tight.data() + static_cast<size_t>(y) * width_ * 3,
-                            base + static_cast<size_t>(y) * dst_stride,
+                            base + static_cast<size_t>(y) * dst_stride * 3,
                             static_cast<size_t>(width_) * 3);
             std::FILE* f = std::fopen(dump_path, "wb");
             if (f) {

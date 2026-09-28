@@ -66,6 +66,14 @@ public:
         if (playing_) return true;
         if (!pipeline_ && !build_locked(err)) return false;
         if (!start_locked(err)) {
+            // The add reply carries this, but neither --parity nor --standalone
+            // prints replies, and "add failed" alone does not say why the
+            // pipeline never reached PLAYING. Deduped: the runtime retries
+            // open() until its add deadline.
+            if (err != last_open_err_) {
+                last_open_err_ = err;
+                std::fprintf(stderr, "gst source: open failed: %s\n", err.c_str());
+            }
             close_locked();
             return false;
         }
@@ -223,11 +231,13 @@ private:
         GstElement* sink = els[5];
 
         g_object_set(decode, "uri", spec_.url.c_str(), nullptr);
-        // Bounded decode: one stream, raw video only, bounded network buffer.
+        // Bounded decode: one stream, bounded network buffer. What keeps the
+        // output to video is the `srccaps` capsfilter below, not uridecodebin's
+        // own (deprecated) `caps` property: setting `caps` to a bare
+        // video/x-raw makes decodebin prune every decoder and fail with
+        // "Your GStreamer installation is missing a plug-in" -- measured on the
+        // CPU base, which then could not decode H.264 at all.
         g_object_set(decode, "expose-all-streams", FALSE, nullptr);
-        GstCaps* stop_at = gst_caps_from_string("video/x-raw");
-        g_object_set(decode, "caps", stop_at, nullptr);
-        gst_caps_unref(stop_at);
         g_object_set(decode, "buffer-size", 2 * 1024 * 1024, nullptr);
         // Source-side cap: refuse to decode past kGstMaxDim (a stream that
         // large fails negotiation instead of allocating an unbounded frame).
@@ -367,6 +377,7 @@ private:
     uint64_t next_seq_ = 0;
     bool eos_ = false;
     bool playing_ = false;
+    std::string last_open_err_;  // dedupes the open-failure stderr line
 };
 
 struct GstInit {
