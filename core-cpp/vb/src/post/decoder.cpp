@@ -11,6 +11,20 @@ namespace vb {
 namespace {
 
 // ---- yolox: [N, 5+nc] (obj*cls), delegates to the shared yolox_decode ----
+//
+// Two output layouts exist in the wild and the decoder picks by geometry:
+//   * raw head (rknn_model_zoo-style export, the M2.1 parity model): rows hold
+//     pre-decode values [tx,ty,tw,th,obj,c...]; the box becomes a pixel corner
+//     only after the per-stride grid decode. When `strides` tiles the model
+//     canvas to exactly the anchor count, this decoder applies that decode
+//     here (levels in the declared order, row-major inside a level), then
+//     hands pixel corners to yolox_decode. Measured on the M2.1 model: with
+//     strides [8,16,32] the top anchor decodes to the bus at cx=203 cy=189
+//     w=172 h=115 of the 416 canvas; corner-math on the same rows produces
+//     sub-pixel corner boxes instead (the M2.1 "CPU detects nothing" bug).
+//   * decoded export (legacy M1.9 assumption, fixture yolox_out_case1.json):
+//     rows are already [x1,y1,x2,y2,...] pixel corners. Any geometry the
+//     strides cannot tile falls through to this path unchanged.
 class YoloXDecoder : public Decoder {
 public:
     explicit YoloXDecoder(DecodeSpec s) : spec_(std::move(s)) {}
@@ -55,6 +69,14 @@ public:
                     tmp[i * ch + c] = data[c * anchors + i];
             data = tmp.data();
         }
+        // Raw-head grid decode: only when the declared strides tile the model
+        // canvas to exactly this anchor count.
+        std::vector<float> corners;
+        if (raw_head_geometry(anchors, model_w, model_h)) {
+            corners.resize(static_cast<size_t>(anchors) * ch);
+            grid_decode(data, corners.data(), anchors, ch, model_w, model_h);
+            data = corners.data();
+        }
         out.dets.clear();
         out.kpts.clear();
         yolox_decode(data, anchors, nc, model_w, model_h, score, out.dets);
@@ -63,6 +85,47 @@ public:
     }
 
 private:
+    // True when every stride divides the canvas and the tiled grid sums to
+    // exactly `anchors` levels-in-declared-order, row-major per level.
+    bool raw_head_geometry(int anchors, int model_w, int model_h) const {
+        if (spec_.strides.empty()) return false;
+        long long total = 0;
+        for (int s : spec_.strides) {
+            if (s <= 0 || model_w % s != 0 || model_h % s != 0) return false;
+            total += static_cast<long long>(model_w / s) * (model_h / s);
+        }
+        return total == anchors;
+    }
+
+    // [tx,ty,tw,th,obj,c...] rows -> [x1,y1,x2,y2,obj,c...] pixel corners.
+    // Rows pass through untouched beyond the first four cells.
+    void grid_decode(const float* src, float* dst, int anchors, int ch,
+                     int model_w, int model_h) const {
+        const size_t row = static_cast<size_t>(ch);
+        long long start = 0;
+        for (int s : spec_.strides) {
+            const int gw = model_w / s, gh = model_h / s;
+            for (int gy = 0; gy < gh; ++gy) {
+                for (int gx = 0; gx < gw; ++gx) {
+                    const float* p = src + static_cast<size_t>(start) * row;
+                    float* q = dst + static_cast<size_t>(start) * row;
+                    const float cx = (sigmoid(p[0]) + gx) * s;
+                    const float cy = (sigmoid(p[1]) + gy) * s;
+                    const float bw = std::exp(p[2]) * s;
+                    const float bh = std::exp(p[3]) * s;
+                    q[0] = cx - bw / 2.0f;
+                    q[1] = cy - bh / 2.0f;
+                    q[2] = cx + bw / 2.0f;
+                    q[3] = cy + bh / 2.0f;
+                    for (int c = 4; c < ch; ++c) q[c] = p[c];
+                    ++start;
+                }
+            }
+        }
+    }
+
+    static float sigmoid(float v) { return 1.0f / (1.0f + std::exp(-v)); }
+
     DecodeSpec spec_;
 };
 

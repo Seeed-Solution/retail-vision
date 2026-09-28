@@ -430,12 +430,21 @@ private:
         pad_ctx_.next = els[1];
         pad_ctx_.encoding_name = codec.encoding_name;
         g_signal_connect(src, "pad-added", G_CALLBACK(on_rtsp_pad_added), &pad_ctx_);
-        bool linked = gst_element_link(els[1], els[2]) &&
-                      gst_element_link(els[2], decoder) &&
-                      gst_element_link(decoder, capsfilter) &&
-                      gst_element_link(capsfilter, sink);
+        bool linked = true;
+        const char* link_names[4] = {"depay->parse", "parse->decoder",
+                                     "decoder->capsfilter", "capsfilter->sink"};
+        GstElement* link_pairs[4][2] = {
+            {els[1], els[2]}, {els[2], decoder}, {decoder, capsfilter}, {capsfilter, sink},
+        };
+        for (int i = 0; i < 4; ++i) {
+            if (!gst_element_link(link_pairs[i][0], link_pairs[i][1])) {
+                err = std::string("failed to link the MPP frame source pipeline at ") +
+                      link_names[i];
+                linked = false;
+                break;
+            }
+        }
         if (!linked) {
-            err = "failed to link the MPP frame source pipeline";
             close_locked();
             return false;
         }
