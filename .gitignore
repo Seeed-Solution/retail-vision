@@ -32,3 +32,6 @@ testdata/
 
 # macOS
 .DS_Store
+
+# 构建与调试用的临时草稿
+.cache/
