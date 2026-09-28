@@ -1,0 +1,3 @@
+# Fetched at build time by docker/base-rk.Dockerfile (proprietary, see
+# README.md). Never commit it.
+*.h

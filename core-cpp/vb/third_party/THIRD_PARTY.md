@@ -17,3 +17,11 @@
 
 - Vendored single header under `third_party/nlohmann/`; see
   `third_party/nlohmann/THIRD_PARTY.md` (M1.3).
+
+## Rockchip librga headers and the RKNN runtime header (rknn backend, M2.1)
+
+Notices for the RK3576/RK3588 adapter live with it, at
+`backends/rknn/third_party/THIRD_PARTY.md`: the Apache-2.0 librga headers are
+vendored (tag v1.10.0, per-file sha256), while `rknn_api.h` and librknnrt are
+proprietary Rockchip material that is fetched at build time under a pinned
+sha256 and never redistributed from this repository or from the image.
