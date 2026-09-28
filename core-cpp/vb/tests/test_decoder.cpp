@@ -609,6 +609,42 @@ int main(int argc, char** argv) {
             CHECK(!dec->decode(&v_bad, 1, 100, 100, 0.5f, 0.45f, o, err));
             CHECK(err.find("5 + 3*keypoints") != std::string::npos);
         }
+        // M2.3 regression: the fused sigmoid's tail can land a few ULP below
+        // zero. Treated as a logit it becomes sigmoid(-2^-24) = 0.5, which
+        // clears the threshold and emits the anchor as a detection; measured
+        // on the Ultralytics pose export under aarch64 ONNX Runtime, 35 of
+        // 8400 anchors carry exactly -5.96e-08 there.
+        {
+            const float kUlp = -5.960464477539063e-08f;
+            std::vector<float> d(static_cast<size_t>(F * 5), 0.0f);
+            auto set = [&](int a, int f, float v) {
+                d[static_cast<size_t>(f * 5 + a)] = v;
+            };
+            // anchor 0: box (40..60, 30..70), class probability 0.9
+            set(0, 0, 50); set(0, 1, 50); set(0, 2, 20); set(0, 3, 40);
+            set(0, 4, 0.9f);
+            for (int k = 0; k < K; ++k) {
+                set(0, 5 + 3 * k, 10 * (k + 1)); set(0, 5 + 3 * k + 1, 20);
+                set(0, 5 + 3 * k + 2, 0.9f);
+            }
+            // anchor 1: its own box (75..85, 15..25), class lane one ULP below
+            // zero -> dropped; NMS cannot hide it (no overlap with anchor 0).
+            set(1, 0, 80); set(1, 1, 20); set(1, 2, 10); set(1, 3, 10);
+            set(1, 4, kUlp);
+            // anchor 2: box (10..30, 0..40), class lane 1.5 -> a real logit,
+            // sigmoid(1.5) = 0.8175744
+            set(2, 0, 20); set(2, 1, 20); set(2, 2, 20); set(2, 3, 40);
+            set(2, 4, 1.5f);
+            TensorView v{d.data(), d.size(), {F, 5}, ""};
+            DetectionResult o;
+            err.clear();
+            // Threshold 0.25 is the point: the buggy mapping is exactly 0.5, so
+            // a 0.5 threshold would drop the artifact through `s <= score`.
+            CHECK(dec->decode(&v, 1, 100, 100, 0.25f, 0.45f, o, err));
+            CHECK(o.dets.size() == 2);
+            CHECK_NEAR(o.dets[0].score, 0.9, 1e-5);
+            CHECK_NEAR(o.dets[1].score, 0.8175744, 1e-6);
+        }
     }
 
     for (const char* f : {"decode_yolov8_case1.json", "decode_yolov8_dfl_case1.json",

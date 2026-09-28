@@ -24,6 +24,12 @@
 //   B (single end-to-end export [5+3K, N] or [N, 5+3K]; fall-detection
 //     platforms/jetson/main/yolo_pose.cpp:38-73): cx, cy, w, h in model-input
 //     pixels (or normalized when |v| <= 2), score, then K × (x, y, conf).
+//     The boxes here are already DFL-decoded and multiplied by the strides,
+//     and the class plane is already sigmoid'd (the Ultralytics export fuses
+//     dfl -> dist2bbox -> *strides and the sigmoid into the graph), so this
+//     path needs no grid or DFL step: it normalizes by the canvas and is done.
+//     Score/conf values are classified as probability-or-logit with kProbTol
+//     of slack, because the fused sigmoid can land a few ULP outside [0,1].
 //
 // Non-finite inputs are dropped rather than rescaled: a NaN score escapes the
 // `score <= threshold` test and reaches the output layer as JSON null, so the
@@ -348,6 +354,19 @@ private:
 
 // ---- yolo_pose -----------------------------------------------------------
 
+// How far outside [0,1] a value may sit and still be a probability: a graph
+// that already applied the sigmoid can emit a value a few ULP below zero.
+// Measured (M2.3): on the same model and the same input tensor, the
+// Ultralytics pose export's class lane holds -2^-24 (-5.96e-08) at 35 of 8400
+// anchors under the device's aarch64 ONNX Runtime 1.21, while macOS arm64
+// 1.29 rounds the same computation to +0 (no other lane disagrees in sign).
+// Testing `v < 0` per value and running sigmoid() on that value returns
+// exactly 0.5, which clears any threshold <= 0.5 and turns every such anchor
+// into a detection: 97.6% of the float reference's boxes carried score 0.5,
+// so no parity comparison against it could be evaluated. 1e-6 is six orders
+// of magnitude below any real logit's distance from the interval.
+constexpr float kProbTol = 1e-6f;
+
 // Split-head exports either fuse the sigmoid into the class plane or leave
 // raw logits; the RK decoder separates them by value range
 // (platforms/rknn/cpp/rknn_postprocess.cpp:95-105). Non-finite entries do not
@@ -358,7 +377,7 @@ bool plane_is_logits(const float* p, size_t n) {
         lo = std::min(lo, p[i]);
         hi = std::max(hi, p[i]);
     }
-    return lo < 0.0f || hi > 1.0f;
+    return lo < -kProbTol || hi > 1.0f + kProbTol;
 }
 
 // Layout B box/keypoint coordinates: values in [-2,2] are treated as
@@ -368,9 +387,16 @@ float coord_to_input(float v, float extent) {
     return std::fabs(v) <= 2.0f ? v * extent : v;
 }
 
+// A value already classified as a probability, with a rounded tail pinned
+// back into [0,1] instead of being re-sigmoided into 0.5.
+float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
 // Layout B probabilities are emitted either as probabilities or as logits
-// (platforms/jetson/main/yolo_pose.cpp:19-23).
-float probability(float v) { return (v >= 0.0f && v <= 1.0f) ? v : sigmoid(v); }
+// (platforms/jetson/main/yolo_pose.cpp:19-23); the classification tolerates a
+// few ULP of rounding outside [0,1] (kProbTol).
+float probability(float v) {
+    return (v >= -kProbTol && v <= 1.0f + kProbTol) ? clamp01(v) : sigmoid(v);
+}
 
 class YoloPoseDecoder : public Decoder {
 public:
@@ -580,7 +606,7 @@ private:
                         float best = 0.0f;
                         for (int c = 0; c < lv.nc; ++c) {
                             float v = lv.cls[static_cast<size_t>(c) * plane + cell];
-                            if (logits) v = sigmoid(v);
+                            v = logits ? sigmoid(v) : clamp01(v);
                             if (!std::isfinite(v)) {
                                 finite = false;
                                 break;
