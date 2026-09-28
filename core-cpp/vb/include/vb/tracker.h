@@ -12,6 +12,7 @@
 // at 1 and increase monotonically; 0 means "not associated".
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 #include "vb/types.h"

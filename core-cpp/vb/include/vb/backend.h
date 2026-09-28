@@ -5,6 +5,7 @@
 // themselves via register_backend() (§5.2.3).
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>

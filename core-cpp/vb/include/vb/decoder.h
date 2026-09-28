@@ -5,6 +5,7 @@
 // default decode path, e.g. the CPU backend's YOLOX head).
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>

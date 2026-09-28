@@ -5,6 +5,7 @@
 // to dev.max_fps per stream, dev.max_streams == 1, and a 16 MiB record cap.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>

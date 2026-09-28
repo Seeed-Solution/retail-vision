@@ -1,6 +1,7 @@
 // Internal: ContextPool definition shared by pool.cpp and runtime.cpp.
 #pragma once
 
+#include <cstddef>
 #include "vb/runtime.h"
 
 namespace vb {

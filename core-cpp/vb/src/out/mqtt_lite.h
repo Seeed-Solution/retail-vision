@@ -23,6 +23,7 @@
 //     shutdown(2), then joins.
 #pragma once
 
+#include <cstddef>
 #include <atomic>
 #include <cstdint>
 #include <deque>

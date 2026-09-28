@@ -2,6 +2,7 @@
 // direction / count_threshold / pose_angle, spec BASE-1 §6.2.5, M1.16/M1.17).
 #pragma once
 
+#include <cstdint>
 #include <cmath>
 #include <string>
 #include <vector>

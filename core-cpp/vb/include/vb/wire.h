@@ -4,6 +4,7 @@
 // (body_len excludes the 8 header bytes).
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>

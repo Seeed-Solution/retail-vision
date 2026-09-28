@@ -3,6 +3,7 @@
 // (spec BASE-1 §5.4 native thread model, §6.3 control protocol, M1.7/M1.8).
 #pragma once
 
+#include <cstddef>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>

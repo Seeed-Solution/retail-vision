@@ -1,4 +1,5 @@
 // Shared 2D geometry helpers (spec BASE-1 §6.2.5, M1.16).
+#include <cstddef>
 #include "vb/geom2d.h"
 
 namespace vb {
