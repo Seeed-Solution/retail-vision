@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <stdexcept>
 #include <vector>
 
@@ -14,6 +15,27 @@ inline Align align_from_int(int v) {
     if (v == 1) return Align::TopLeft;
     throw std::invalid_argument("align must be 0 (center) or 1 (top_left)");
 }
+
+// What the model's input tensor expects. The frame format from the pipeline
+// (RGB or BGR888) says nothing about the model, so this is declared rather
+// than inferred from FrameBuf::fmt.
+enum class ColorOrder : uint8_t { BGR = 0, RGB = 1 };
+
+struct InputSpec {
+    ColorOrder color_order = ColorOrder::BGR;
+    // 255.0 => the model takes 0..1; 1.0 => it takes 0..255 unchanged.
+    float divide = 1.0f;
+
+    // Defaults follow each family's own convention: YOLOX's released ONNX
+    // takes BGR 0-255 (its demo feeds cv2 output unscaled), Ultralytics YOLOv8
+    // and classifier exports take RGB 0-1.
+    static InputSpec default_for_decoder(const std::string& type) {
+        if (type == "yolov8" || type == "yolov8_dfl" || type == "yolo_pose" ||
+            type == "classify")
+            return InputSpec{ColorOrder::RGB, 255.0f};
+        return InputSpec{ColorOrder::BGR, 1.0f};  // yolox, raw
+    }
+};
 
 struct LetterboxGeom {
     int32_t src_w = 0, src_h = 0, model_w = 0, model_h = 0;

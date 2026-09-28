@@ -715,6 +715,23 @@
        ],
        "type": "object"
       },
+      "input": {
+       "additionalProperties": false,
+       "properties": {
+        "color_order": {
+         "enum": [
+          "bgr",
+          "rgb"
+         ]
+        },
+        "divide": {
+         "default": 1.0,
+         "exclusiveMinimum": 0,
+         "type": "number"
+        }
+       },
+       "type": "object"
+      },
       "input_size": {
        "default": [
         640,

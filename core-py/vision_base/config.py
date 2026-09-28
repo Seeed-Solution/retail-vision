@@ -247,6 +247,34 @@ def _check_dev(data: dict, *, allow_dev: bool) -> None:
         _err("dev.max_streams", "must be 1")
 
 
+_INPUT_COLOR_ORDERS = ("bgr", "rgb")
+
+
+def _check_input(backend: dict) -> None:
+    """backend.input (§6.11): only what the model actually expects.
+
+    Absent, each backend resolves it from the decoder family — yolox/raw take
+    BGR 0-255, the Ultralytics families take RGB 0-1. Declaring it here
+    overrides that; it is never inferred from the frame format.
+    """
+    if not isinstance(backend, dict):
+        return
+    inp = backend.get("input")
+    if inp is None:
+        return
+    if not isinstance(inp, dict):
+        _err("backend.input", "must be an object")
+    unknown = set(inp) - {"color_order", "divide"}
+    if unknown:
+        _err("backend.input", f"unknown key(s): {sorted(unknown)}")
+    if "color_order" in inp and inp["color_order"] not in _INPUT_COLOR_ORDERS:
+        _err("backend.input.color_order", 'must be "bgr" or "rgb"')
+    if "divide" in inp:
+        d = inp["divide"]
+        if not isinstance(d, (int, float)) or isinstance(d, bool) or d <= 0:
+            _err("backend.input.divide", "must be a number > 0")
+
+
 def _validate(data: dict, *, partial: bool = False, allow_dev: bool = False) -> None:
     if not isinstance(data, dict):
         _err("$", "top level must be an object")
@@ -345,6 +373,8 @@ def _validate(data: dict, *, partial: bool = False, allow_dev: bool = False) -> 
     if mqtt["port"] > 65535:
         _err("mqtt.port", "must be <= 65535")
     _check_str(mqtt.get("client_id", ""), "mqtt.client_id", nonempty=False)
+    _check_input(backend)
+
     _check_num(mqtt["keepalive_s"], "mqtt.keepalive_s", lo=1.0)
     _check_num(mqtt["status_interval_s"], "mqtt.status_interval_s", lo=0.1)
     if not partial:

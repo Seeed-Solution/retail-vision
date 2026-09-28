@@ -14,6 +14,15 @@
       "properties": {
         "name": { "type": "string", "minLength": 1 },
         "model_path": { "type": "string", "minLength": 1 },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "What the model's input tensor expects. Absent, it follows the decoder family's own convention: yolox/raw take BGR 0-255, yolov8/yolov8_dfl/yolo_pose/classify take RGB 0-1.",
+          "properties": {
+            "color_order": { "enum": ["bgr", "rgb"] },
+            "divide": { "type": "number", "exclusiveMinimum": 0, "default": 1.0 }
+          }
+        },
         "model_sha256": {
           "type": "string", "default": "",
           "pattern": "^([0-9a-fA-F]{64})?$",

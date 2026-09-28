@@ -115,8 +115,8 @@ std::string lower_ascii(std::string s) {
 }
 
 // ---- Letterbox + RGB(A/BGR) -> NCHW float preprocessing (plain loops) ----
-void preprocess(const FrameBuf& f, const LetterboxGeom& g, bool bgr,
-                std::vector<float>& nchw) {
+void preprocess(const FrameBuf& f, const LetterboxGeom& g,
+                const InputSpec& in, std::vector<float>& nchw) {
     const int mw = g.model_w, mh = g.model_h;
     const int iw0 = static_cast<int>(g.pad_x);            // image region origin
     const int ih0 = static_cast<int>(g.pad_y);
@@ -148,7 +148,7 @@ void preprocess(const FrameBuf& f, const LetterboxGeom& g, bool bgr,
             for (int c = 0; c < 3; ++c) {
                 float v = (p00[c] * (1 - fx) + p01[c] * fx) * (1 - fy) +
                           (p10[c] * (1 - fx) + p11[c] * fx) * fy;
-                ch[c] = v / 255.0f;
+                ch[c] = v / in.divide;
             }
             size_t off = static_cast<size_t>(y) * mw + x;
             plane_r[off] = ch[0];
@@ -156,7 +156,8 @@ void preprocess(const FrameBuf& f, const LetterboxGeom& g, bool bgr,
             plane_b[off] = ch[2];
         }
     }
-    if (bgr) std::swap_ranges(plane_r, plane_r + static_cast<size_t>(mw) * mh, plane_b);
+    if (in.color_order == ColorOrder::BGR)
+        std::swap_ranges(plane_r, plane_r + static_cast<size_t>(mw) * mh, plane_b);
 }
 
 class CpuBackend;
@@ -203,6 +204,30 @@ public:
             if (decoder != "yolox") {
                 err = "cpu backend: unsupported decoder '" + decoder + "'";
                 return;
+            }
+        }
+        // backend.input: what the model's input tensor expects. Absent, it
+        // follows the decoder family's own convention (the frame format from
+        // the pipeline says nothing about the model).
+        {
+            const std::string dec_type =
+                (dj != j.end() && dj->is_object())
+                    ? dj->value("type", std::string("yolox"))
+                    : "yolox";
+            input_ = InputSpec::default_for_decoder(dec_type);
+            auto ij = j.find("input");
+            if (ij != j.end() && ij->is_object()) {
+                if (ij->contains("color_order")) {
+                    const std::string co = ij->at("color_order").get<std::string>();
+                    if (co == "bgr") input_.color_order = ColorOrder::BGR;
+                    else if (co == "rgb") input_.color_order = ColorOrder::RGB;
+                    else { err = "backend.input.color_order must be bgr or rgb"; return; }
+                }
+                if (ij->contains("divide")) {
+                    const double dv = ij->at("divide").get<double>();
+                    if (!(dv > 0.0)) { err = "backend.input.divide must be > 0"; return; }
+                    input_.divide = static_cast<float>(dv);
+                }
             }
         }
         model_path_ = j.at("model_path").get<std::string>();
@@ -356,7 +381,7 @@ public:
             return false;
         }
         std::vector<float> nchw;
-        preprocess(f, out.geom, f.fmt == PixFmt::BGR888, nchw);
+        preprocess(f, out.geom, input_, nchw);
         double t1 = now_ms();
 
         const int64_t in_shape[4] = {1, 3, model_h_, model_w_};
@@ -595,6 +620,7 @@ private:
     std::vector<uint8_t> model_bytes_;  // verified bytes ORT loaded from
     std::unique_ptr<Decoder> decoder_;  // §6.11 backend.decoder (may be null)
     bool decoder_is_raw_ = false;       // §6.12 dev-mode raw passthrough
+    InputSpec input_;                  // backend.input, else decoder default
     std::mutex raw_mu_;                 // guards last_raw_
     std::vector<DevTensor> last_raw_;   // dev-mode raw outputs (§6.12)
     std::vector<std::string> out_names_;  // all outputs when decoder_ is set

@@ -51,7 +51,27 @@ int make_listen_socket(const char* path) {
     return fd;
 }
 
-int run_parity(const RuntimeConfig& cfg, const char* dir, int frames) {
+// Streams listed in the config file. Parity runs from a config alone (no
+// control plane to add streams), so the list has to be read here; shard
+// configs have none (§6.9 rule 4) and the IPC path passes an empty vector.
+static void load_config_streams(const char* config_path,
+                                std::vector<vb::Json>& out) {
+    std::ifstream f(config_path);
+    if (!f) return;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    try {
+        auto j = vb::json_parse(ss.str());
+        auto it = j.find("streams");
+        if (it != j.end() && it->is_array())
+            for (const auto& s : *it) out.push_back(s);
+    } catch (...) {
+        // A malformed config is reported by RuntimeConfig::load; nothing to add.
+    }
+}
+
+int run_parity(const RuntimeConfig& cfg, const char* config_path, const char* dir,
+               int frames) {
     Writer writer;
     std::string err;
     auto backend = vb::create_backend(cfg.backend_name, cfg.backend_json, err);
@@ -60,6 +80,13 @@ int run_parity(const RuntimeConfig& cfg, const char* dir, int frames) {
         return 1;
     }
     Runtime rt(std::move(backend), cfg, writer);
+    load_config_streams(config_path, rt.config_streams);
+    if (rt.config_streams.empty()) {
+        std::fprintf(stderr,
+                     "parity: the config lists no streams - refusing to fall "
+                     "back to synthetic input\n");
+        return 1;
+    }
     std::vector<vb::WireFrameRec> collected;
     std::mutex mu;
     rt.on_frame_rec = [&](const vb::WireFrameRec& r) {
@@ -247,7 +274,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "%s\n", err.c_str());
         return 1;
     }
-    if (parity_dir) return run_parity(cfg, parity_dir, frames);
+    if (parity_dir) return run_parity(cfg, config_path, parity_dir, frames);
 
     auto backend = vb::create_backend(cfg.backend_name, cfg.backend_json, err);
     if (!backend) {
@@ -271,21 +298,7 @@ int main(int argc, char** argv) {
 
     Writer writer;
     Runtime rt(std::move(backend), cfg, writer);
-    // Config-listed streams (parity convenience; shard configs have none).
-    {
-        std::ifstream f(config_path);
-        if (f) {
-            std::stringstream ss;
-            ss << f.rdbuf();
-            try {
-                auto j = vb::json_parse(ss.str());
-                auto it = j.find("streams");
-                if (it != j.end() && it->is_array())
-                    for (const auto& s : *it) rt.config_streams.push_back(s);
-            } catch (...) {
-            }
-        }
-    }
+    load_config_streams(config_path, rt.config_streams);
     writer.start([&writer, &conn_fd](const uint8_t* data, size_t len) {
         if (conn_fd < 0) return;
         // B8: the peer may keep the connection open without reading. The write

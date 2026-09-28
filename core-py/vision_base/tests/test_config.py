@@ -145,3 +145,46 @@ def test_health_defaults_to_loopback(tmp_path):
     cfg["health"] = {"host": "0.0.0.0", "port": 8099}
     path.write_text(json.dumps(cfg))
     assert load(str(path)).health["host"] == "0.0.0.0"
+
+# ------------------------------------------------- backend.input (§6.11)
+
+FULL_FIXTURE = (pathlib.Path(__file__).resolve().parents[3] / "contracts" / "fixtures" / "vb" / "config_valid" / "full.json")
+
+
+def _write_with_input(tmp_path, inp, drop=False):
+    cfg = json.loads(FULL_FIXTURE.read_text(encoding="utf-8"))
+    if drop:
+        cfg["backend"].pop("input", None)
+    else:
+        cfg["backend"]["input"] = inp
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps(cfg), encoding="utf-8")
+    return p
+
+
+@pytest.mark.parametrize("inp", [
+    {"color_order": "bgr"}, {"color_order": "rgb"},
+    {"divide": 1.0}, {"divide": 255.0},
+    {"color_order": "rgb", "divide": 255.0},
+])
+def test_backend_input_accepts_valid(tmp_path, inp):
+    from vision_base.config import load
+    load(str(_write_with_input(tmp_path, inp)))
+
+
+@pytest.mark.parametrize("inp", [
+    {"color_order": "gray"},
+    {"divide": 0},
+    {"divide": -1},
+    {"unknown_key": 1},
+])
+def test_backend_input_rejects_invalid(tmp_path, inp):
+    from vision_base.config import load, ConfigError
+    with pytest.raises(ConfigError):
+        load(str(_write_with_input(tmp_path, inp)))
+
+
+def test_backend_input_absent_is_fine(tmp_path):
+    """It is optional: the backend falls back to the decoder family."""
+    from vision_base.config import load
+    load(str(_write_with_input(tmp_path, {}, drop=True)))

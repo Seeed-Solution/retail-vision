@@ -389,5 +389,23 @@ int main(int argc, char** argv) {
 #endif
 
     std::printf("cpu_backend: all OK\n");
+    // ---- Part D: backend.input (§6.11) -------------------------------
+    // The frame format from the pipeline says nothing about what the model
+    // expects; the convention is declared, or defaulted by decoder family.
+    {
+        using vb::ColorOrder;
+        auto yolox = vb::InputSpec::default_for_decoder("yolox");
+        CHECK(yolox.color_order == ColorOrder::BGR);
+        CHECK(yolox.divide == 1.0f);           // YOLOX's ONNX takes 0-255
+
+        for (const char* d : {"yolov8", "yolov8_dfl", "yolo_pose", "classify"}) {
+            auto sp = vb::InputSpec::default_for_decoder(d);
+            CHECK(sp.color_order == ColorOrder::RGB);   // Ultralytics: RGB 0-1
+            CHECK(sp.divide == 255.0f);
+        }
+        CHECK(vb::InputSpec::default_for_decoder("raw").divide == 1.0f);
+        std::printf("D: backend.input defaults follow the decoder family\n");
+    }
+
     return 0;
 }
