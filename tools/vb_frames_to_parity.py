@@ -2,14 +2,12 @@
 """Turn a `vb-runtime --standalone --output jsonl --frame-every 1` capture into
 the `<dir>/parity.jsonl` shape that tools/vb_parity_compare.py reads.
 
-Why this exists (BASE-1 M2.1): `vb-runtime --parity <dir>` cannot consume a
-real stream. `Runtime::config_streams` is filled in main() *after* the
-`if (parity_dir) return run_parity(...)` early return, so run_parity() always
-sees an empty list and falls back to its synthetic:// stream — which no platform
-backend can accept, because the platform adapters require device memory. The
-standalone path (§6.10) reads `streams` from the config file, so it is the
-supported way to produce per-frame detections from a real source; this script
-re-expresses its `vb.frame/1` records as parity records.
+Why this exists (BASE-1 M2.1): the standalone path (§6.10) reads `streams` from
+the config file, so it is the supported way to produce per-frame detections
+from a real source; this script re-expresses its `vb.frame/1` records as
+parity records. It is also the only parity path that carries per-detection
+keypoints (M2.3): `vb-runtime --parity` writes boxes only, while vb.frame/1
+records carry them, so pose-model comparisons run through here.
 
   uv run python tools/vb_frames_to_parity.py --frames <capture.jsonl> \
       --out <parity-dir> [--stream parity-0] [--max-frames 50]
@@ -79,6 +77,13 @@ def main() -> int:
                 d["score"] = det.get("score", 0.0)
                 d["class_id"] = det.get("class_id", 0)
                 d["track_id"] = det.get("track_id", 0)
+                # Pose models: per-detection keypoints as [[x, y, conf], ...],
+                # already normalised in the vb.frame/1 record. Both runs of a
+                # comparison share the source geometry, so the coordinates
+                # compare directly (spec BASE-1 §M2.3: keypoint coordinates
+                # must be compared separately - the half-cell decoder issue).
+                if "keypoints" in det:
+                    d["keypoints"] = det["keypoints"]
                 dets.append(d)
             rec = {
                 "stream_index": args.stream_index,
