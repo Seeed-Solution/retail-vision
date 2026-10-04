@@ -51,9 +51,45 @@ open，从而从 F1 开始完整采集。
    两侧各得到 `<dir>/parity.jsonl`。
 4. `uv run python tools/parity_fixture_check.py --ref <cpu_dir>/parity.jsonl --got <rk_dir>/parity.jsonl --frames <N>`
    必须退出 0（N 用 feed 打印的 `PARITY_FRAMES`；消费者 `--frames` 也用这个 N）。
+   若 feed 用了 `--pattern odd-empty`，把打印的 `PARITY_PATTERN` 传给 check：
+   `... --expect-pattern odd-empty`（见下节「内容相位校验」）。旧行为（只查行数）
+   保留为 `--frames-only`。
 5. check 通过后 `vb_parity_compare.py` 的结论才算数：
    - `exit 0` = 通过；`exit 1` = 模型分歧（真实信号）；
-   - check `exit 3` = 夹具未对齐（丢帧/晚 attach）→ **重跑**，不要调阈值。
+   - check `exit 3` = 夹具未对齐（丢帧/晚 attach/**内容相位错位**）→ **重跑**，不要调阈值。
+
+## 职责边界：parity_fixture_check.py vs vb_parity_compare.py
+
+- **check 的 `exit 3` = 夹具未对齐**：两侧 parity.jsonl 的行配对无意义——行数不等于
+  N（丢帧/晚 attach），或内容相位错位（丢首帧等，见下节）。此时 compare 的任何
+  数字都作废，必须重跑实验，**不得**调 compare 阈值。
+- **compare 的 `exit 1` = 模型分歧**：仅在 check `exit 0` 之后，逐行配对才有意义，
+  此时 compare 失败是真实的模型行为差异信号。
+- 一句话：check 管的是「两侧看到的是不是同一帧序列」，compare 管的是「同一帧上
+  两个模型的行为差多少」。check 不做模型判定，compare 不做夹具判定，退出码语义
+  互不重叠。
+
+## 内容相位校验（--expect-pattern）
+
+**为什么行数不够**（实测，2026-10 radxa）：float（gst_source）消费者稳定丢失
+payload 第 0 帧，其 22 行序列 = 正确序列左移 1 帧——行数仍是 N，旧行数校验依然报
+ALIGNED，导致下游逐行配对全部带 +1 相位污染。parity.jsonl 每行只有 detections，
+无帧指纹，所以相位证据由夹具发布端制造：
+
+- `parity_feed.sh --pattern odd-empty` 在 payload 中交错插入纯灰帧（0x727272，
+  与画布 letterbox 填充同值，无检出），使两侧检出数序列成为已知模式：
+  **偶数行（line 0,2,4,…）有检出，奇数行为 0**（payload 第 0 帧是内容帧）。
+  feed 打印 `PARITY_PATTERN=odd-empty`。
+- check 传 `--expect-pattern odd-empty` 后按行校验该模式。**奇数总偏移
+  （含丢首帧的 +1）必然使相位翻转 → exit 3**，并输出偏移结论
+  （`shifted by +1 (first payload frame(s) dropped ...)`）。
+- 相位校验按侧独立进行，**不要求两个模型的检出数一致**——模式只区分
+  「空 / 非空」，模型分歧不影响判定。也接受逗号分隔的精确检出数列表。
+- 局限（如实声明）：纯交替模式只能抓**奇数**偏移；偶数偏移（≥2）与正确相位在
+  空/非空意义上不可区分。实测的 bug 是 +1，可抓。更强的指纹需要引擎输出帧号
+  （改引擎，超出本夹具范围）。
+- 要求源片段的每个内容帧在该模型 score 阈值下都 ≥1 检出（BASE-1 的
+  vb-720p15-h264.mp4 实测 float/RK 每帧 1–6 检出，满足）。
 
 ## fps / window / warmup 选择规则
 

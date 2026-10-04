@@ -33,10 +33,25 @@
 # late misses a prefix (fewer lines) — parity_fixture_check.py flags it as a
 # fixture failure (exit 3); re-run the experiment, do not touch thresholds.
 #
+# Content phase pattern (--pattern odd-empty): interleaves solid gray
+# (0x727272, same value as the engine canvas letterbox fill) frames into the
+# payload so the per-line detection-count sequence is >=1,0,>=1,0,... (odd
+# parity lines empty — payload line 0 is content, line 1 is gray). This
+# gives parity_fixture_check.py (--expect-pattern) phase evidence: a consumer
+# that drops the first payload frame still logs N lines (line counts stay
+# equal) but its empty/occupied phase is inverted, which the check flags as a
+# fixture failure. Any ODD total shift is caught; an even shift (>=2) is NOT
+# distinguishable from correct phase by this pattern alone.
+#
 # Usage:
 #   parity_feed.sh <clip.(mp4|mkv|...)> [--fps N] [--readers K] [--window S]
 #                  [--rtsp-port P] [--api-port Q] [--path NAME]
+#                  [--pattern odd-empty]
 #   MEDIAMTX_BIN=/path/to/mediamtx  (default: $WORK_DIR/bin/mediamtx)
+#
+# Prints PARITY_FRAMES=<N> (total frames minus the doorbell frame F0) and,
+# with --pattern, PARITY_PATTERN=odd-empty (pass it to
+# parity_fixture_check.py --expect-pattern).
 #
 # Prints PARITY_FRAMES=<N> (total frames minus the doorbell frame F0).
 #
@@ -55,6 +70,7 @@ WARMUP=5
 RTSP_PORT=18664
 API_PORT=19970
 PATH_NAME=vb-parity-fixture
+PATTERN=""
 MEDIAMTX_BIN="${MEDIAMTX_BIN:-${WORK_DIR:-$HOME/vb-work}/bin/mediamtx-1.12.3}"
 READERS_TIMEOUT=120
 
@@ -67,6 +83,7 @@ while [ $# -gt 0 ]; do
     --rtsp-port) RTSP_PORT="$2"; shift 2 ;;
     --api-port)  API_PORT="$2"; shift 2 ;;
     --path)      PATH_NAME="$2"; shift 2 ;;
+    --pattern)   PATTERN="$2"; shift 2 ;;
     -h|--help)   usage; exit 0 ;;
     -*)          echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
     *)           if [ -n "$CLIP" ]; then echo "unexpected arg: $1" >&2; exit 1; fi
@@ -82,6 +99,11 @@ WORK="$(mktemp -d /tmp/parity-feed.XXXXXX)"
 cleanup() { kill "${PUB_PID:-0}" "${MM_PID:-0}" 2>/dev/null || true; [ -z "${PARITY_FEED_KEEPLOG:-}" ] || cp "$MM_LOG" /tmp/parity-feed-mediamtx.log 2>/dev/null || true; rm -rf "$WORK"; }
 trap cleanup EXIT
 
+case "$PATTERN" in
+  ""|odd-empty) ;;
+  *) echo "unsupported --pattern: $PATTERN (only odd-empty)" >&2; exit 1 ;;
+esac
+
 CLIP_ABS="$(readlink -f "$CLIP")"
 GAPPED="$WORK/gapped.mp4"
 MM_YML="$WORK/mediamtx.yml"
@@ -94,6 +116,9 @@ MM_LOG="$WORK/mediamtx.log"
 #      frames F2.. (else): t=WINDOW+WARMUP+rest   warm-up gap after F1
 #    (after fps=, the k-th frame has T=(k-1)/FPS; the >=0.3 shift is
 #    WINDOW + WARMUP + 1.6 so that F2's delta after F1 is exactly WARMUP.)
+#    With --pattern odd-empty every odd payload line (gapped frame i+1 with i
+#    odd) is a solid gray frame (0 detections); payload line 0 (first frame
+#    after the doorbell) and all other even lines are source content.
 #    tpad then clones the last frame 6 times: the final RTP frames of a
 #    single-pass stream are routinely lost at publisher teardown, and a
 #    consumer that captured N-1 rows would otherwise silently wait forever
@@ -107,18 +132,33 @@ echo "[parity_feed] pre-rendering $CLIP_ABS -> all-intra ${FPS}fps, doorbell + $
 # the publisher start, so a variable-length render would shift it.
 CACHE_DIR=/tmp/parity-feed-cache
 mkdir -p "$CACHE_DIR"
-CACHE_KEY="$(stat -c '%s-%Y' "$CLIP_ABS")-fps${FPS}-w${WINDOW}-u${WARMUP}"
+CACHE_KEY="$(stat -c '%s-%Y' "$CLIP_ABS")-fps${FPS}-w${WINDOW}-u${WARMUP}-p${PATTERN:-none}"
 CACHE_FILE="$CACHE_DIR/$CACHE_KEY.mp4"
 if [ -s "$CACHE_FILE" ]; then
   cp "$CACHE_FILE" "$GAPPED"
   echo "[parity_feed] using cached render $CACHE_FILE" >&2
 else
-  ffmpeg -hide_banner -loglevel error -y -i "$CLIP_ABS" \
-    -vf "fps=${FPS},tpad=stop_mode=clone:stop=6,setpts=PTS-STARTPTS+${WINDOW}/TB*gte(T\,0.1)+$(awk -v w="$WARMUP" 'BEGIN{printf "%.3f", w+1.6}')/TB*gte(T\,0.3)" \
-    -an -fps_mode passthrough \
-    -c:v libx264 -preset veryfast -tune zerolatency \
-    -x264-params keyint=1:min-keyint=1 -pix_fmt yuv420p \
-    "$GAPPED" || exit 2
+  PTS_SCHED="setpts=PTS-STARTPTS+${WINDOW}/TB*gte(T\,0.1)+$(awk -v w="$WARMUP" 'BEGIN{printf "%.3f", w+1.6}')/TB*gte(T\,0.3)"
+  if [ -n "$PATTERN" ]; then
+    # Interleave a gray frame before every source frame (interleave picks the
+    # lowest-pts input each step; equal-rate inputs alternate deterministically).
+    W="$(ffprobe -v error -select_streams v:0 -show_entries stream=width  -of csv=p=0 "$CLIP_ABS")"
+    H="$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$CLIP_ABS")"
+    DUR="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$CLIP_ABS")"
+    ffmpeg -hide_banner -loglevel error -y -i "$CLIP_ABS" \
+      -filter_complex "[0:v]fps=${FPS},setsar=1[v];color=c=0x727272:s=${W}x${H}:r=${FPS}:d=${DUR}[bg];[bg][v]interleave,${PTS_SCHED}" \
+      -an -fps_mode passthrough \
+      -c:v libx264 -preset veryfast -tune zerolatency \
+      -x264-params keyint=1:min-keyint=1 -pix_fmt yuv420p \
+      "$GAPPED" || exit 2
+  else
+    ffmpeg -hide_banner -loglevel error -y -i "$CLIP_ABS" \
+      -vf "fps=${FPS},${PTS_SCHED}" \
+      -an -fps_mode passthrough \
+      -c:v libx264 -preset veryfast -tune zerolatency \
+      -x264-params keyint=1:min-keyint=1 -pix_fmt yuv420p \
+      "$GAPPED" || exit 2
+  fi
   cp "$GAPPED" "$CACHE_FILE" || true
 fi
 
@@ -129,6 +169,7 @@ DOORBELL=1; PAD=6
 N=$((TOTAL - DOORBELL - PAD))   # doorbell frame F0 + trailing clones are not payload
 [ "$N" -gt 0 ] || { echo "clip produced no payload frames" >&2; exit 2; }
 echo "PARITY_FRAMES=$N"
+[ -z "$PATTERN" ] || echo "PARITY_PATTERN=$PATTERN"
 echo "[parity_feed] run consumers with --frames $N" >&2
 
 # 2. Own mediamtx instance: fixture RTSP port, API enabled, TCP only (the
