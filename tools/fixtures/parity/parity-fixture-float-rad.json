@@ -1,0 +1,44 @@
+{
+ "schema": "vb.config/1",
+ "runtime": {
+  "contexts_per_worker": 1,
+  "open_timeout_s": 120.0,
+  "reconnect_delay_s": 0.2
+ },
+ "tracker": {
+  "enabled": false
+ },
+ "analyzers": {
+  "plugins": []
+ },
+ "snapshot_ring": {
+  "frames": 0
+ },
+ "streams": [
+  {
+   "stream_id": "parity-fixture",
+   "url": "rtsp://<device-ip>:18664/vb-parity-fixture",
+   "transport": "tcp",
+   "score_threshold": 0.3,
+   "options": {
+    "codec": "h264"
+   }
+  }
+ ],
+ "description": "BASE-1 parity frame-alignment fixture, float-on-device cross-check side (radxa, CPU backend with the float ONNX model). Mirrors the RK fixture config but runs the float reference on the device itself; gate 2 (--faithfulness) compares this run against the RK run on the same fixture canvas.",
+ "backend": {
+  "name": "cpu",
+  "model_path": "/models/yolox_tiny.onnx",
+  "model_sha256": "427cc366d34e27ff7a03e2899b5e3671425c262ea2291f88bb942bc1cc70b0f7",
+  "intra_threads": 4,
+  "decoder": {
+   "type": "yolox",
+   "num_classes": 80,
+   "strides": [
+    8,
+    16,
+    32
+   ]
+  }
+ }
+}
