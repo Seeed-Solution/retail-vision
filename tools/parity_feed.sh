@@ -132,13 +132,28 @@ echo "[parity_feed] pre-rendering $CLIP_ABS -> all-intra ${FPS}fps, doorbell + $
 # the publisher start, so a variable-length render would shift it.
 CACHE_DIR=/tmp/parity-feed-cache
 mkdir -p "$CACHE_DIR"
-CACHE_KEY="$(stat -c '%s-%Y' "$CLIP_ABS")-fps${FPS}-w${WINDOW}-u${WARMUP}-p${PATTERN:-none}"
+# v2: restores tpad (8d08bf4 regression) and index-based --pattern PTS (v1
+# pattern renders had duplicate/interleaved PTS — never reuse v1 cache).
+CACHE_KEY="v2-$(stat -c '%s-%Y' "$CLIP_ABS")-fps${FPS}-w${WINDOW}-u${WARMUP}-p${PATTERN:-none}"
 CACHE_FILE="$CACHE_DIR/$CACHE_KEY.mp4"
 if [ -s "$CACHE_FILE" ]; then
   cp "$CACHE_FILE" "$GAPPED"
   echo "[parity_feed] using cached render $CACHE_FILE" >&2
 else
-  PTS_SCHED="setpts=PTS-STARTPTS+${WINDOW}/TB*gte(T\,0.1)+$(awk -v w="$WARMUP" 'BEGIN{printf "%.3f", w+1.6}')/TB*gte(T\,0.3)"
+  if [ -n "$PATTERN" ]; then
+    # Timestamps by FRAME INDEX, not raw PTS: after interleave both inputs
+    # start at PTS 0 at the same rate, so raw T is ambiguous (v1 produced
+    # duplicate pairs like 20.200000/20.200001). Index schedule per design:
+    #   N=0 (doorbell):  t=0
+    #   N=1 (payload):   t=WINDOW
+    #   N>=2:            t=WINDOW+WARMUP+(N-2)/FPS
+    # tpad sits BEFORE setpts so the 6 clones also get increasing index PTS.
+    IDX_SCHED="setpts=if(eq(N\\,0)\\,0\\,if(eq(N\\,1)\\,${WINDOW}\\,${WINDOW}+${WARMUP}+(N-2)/${FPS}))/TB"
+  else
+    # Un-patterned path: identical to 8d08bf4 (after fps= the k-th frame has
+    # T=(k-1)/FPS, so gte(T,0.1)/gte(T,0.3) select F1+ / F2+ reliably).
+    IDX_SCHED="setpts=PTS-STARTPTS+${WINDOW}/TB*gte(T\,0.1)+$(awk -v w="$WARMUP" 'BEGIN{printf "%.3f", w+1.6}')/TB*gte(T\,0.3)"
+  fi
   if [ -n "$PATTERN" ]; then
     # Interleave a gray frame before every source frame (interleave picks the
     # lowest-pts input each step; equal-rate inputs alternate deterministically).
@@ -146,14 +161,14 @@ else
     H="$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$CLIP_ABS")"
     DUR="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$CLIP_ABS")"
     ffmpeg -hide_banner -loglevel error -y -i "$CLIP_ABS" \
-      -filter_complex "[0:v]fps=${FPS},setsar=1[v];color=c=0x727272:s=${W}x${H}:r=${FPS}:d=${DUR}[bg];[bg][v]interleave,${PTS_SCHED}" \
+      -filter_complex "[0:v]fps=${FPS},setsar=1[v];color=c=0x727272:s=${W}x${H}:r=${FPS}:d=${DUR}[bg];[bg][v]interleave,tpad=stop_mode=clone:stop=6,${IDX_SCHED}" \
       -an -fps_mode passthrough \
       -c:v libx264 -preset veryfast -tune zerolatency \
       -x264-params keyint=1:min-keyint=1 -pix_fmt yuv420p \
       "$GAPPED" || exit 2
   else
     ffmpeg -hide_banner -loglevel error -y -i "$CLIP_ABS" \
-      -vf "fps=${FPS},${PTS_SCHED}" \
+      -vf "fps=${FPS},tpad=stop_mode=clone:stop=6,${IDX_SCHED}" \
       -an -fps_mode passthrough \
       -c:v libx264 -preset veryfast -tune zerolatency \
       -x264-params keyint=1:min-keyint=1 -pix_fmt yuv420p \
