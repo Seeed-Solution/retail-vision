@@ -63,13 +63,29 @@
   2. **spark onnxruntime**：同一 canvas.raw（416×416×3，BGR 0-255）喂 `yolox_tiny.onnx`，得 float 参考 raw；
   3. **radxa `rknn_dump`**：同一 canvas.raw int8 native 喂 B1（或待测）.rknn，得设备 raw；
   4. **同一套引擎语义解码**：strides 8/16/32、row-major grid decode、obj×cls、thr 0.3、贪心 class-aware NMS 0.45（对齐 `core-cpp/vb/src/post/{decoder,yolox_decode,nms}.cpp`）；参考实现 `/tmp/row0_compare.py`（spark）。
-- **判据**（沿用离线口径并补齐数量/空结果项，与 `tools/vb_parity_compare.py` 实际检查项一致）——**全部满足**才算通过：
-  1. box(0-3) mean err **≤ 0.02**；
-  2. 解码 meanIoU **≥ 0.95**；
-  3. **未匹配的参考检出数 = 0**（即每帧每个参考检出都必须配对，`vb_parity_compare.py`：`unmatched > 0` 即 FAIL；如需放宽须给出明确容忍上限，不得默认）——这条防止靠丢检出让剩余配对满足 1/2 的假通过；
-  4. **每帧数量差 ≤ 1**（沿用 `vb_parity_compare.py` 的 `--count-diff` 语义，默认 1）；
-  5. **空结果处理**（显式规则，不得因「没有可配对的框」静默通过）：参考 0 检出而设备 >0 检出 → **FAIL**（数量差超限）；两侧都 0 → 记为该帧通过但**计入覆盖统计**（报告零检出帧占比，避免整段空流以 0/0 meanIoU 静默达标）。注意：`vb_parity_compare.py` 当前对「两侧都 0」的帧仅自然通过、未单列覆盖统计，新口径要求统计侧补充这一项（工具改动另行立项，文档先立口径）。
-  - B1 已达标（box 0.0143 / meanIoU 0.9814），引擎行 0 同口径复现 0.9814。
+- **判据**（逐条区分「工具已有」与「待实现」，避免声称全部与 `tools/vb_parity_compare.py` 现状一致）——**全部满足**才算通过：
+
+  **工具已有**（与 `tools/vb_parity_compare.py` 当前代码一致，行号以实文件为准）：
+  1. box(0-3) mean err **≤ 0.02**（离线口径，工具外人工计算）；
+  2. **每一个匹配对的 IoU 都必须 ≥ 0.95**（逐对口径，等价 `vb_parity_compare.py --iou 0.95`：`below = [v for v in frame_ious if v < iou_th]`，`below` 非空即 FAIL，`tools/vb_parity_compare.py:148-151`）。**不是均值口径**——实测反例：两组框 IoU 1.0000 与 0.9048（mean 0.9524 ≥ 0.95），工具仍 FAIL（`1 paired IoU below 0.95 (min 0.9048)`，exit 1，原始输出见下）。解码 meanIoU 只作**报告/诊断**（工具汇总行 `mean_iou=`），**不作为通过条件**；
+  3. **未匹配的参考检出数 = 0**（每帧每个参考检出都必须配对，`unmatched > 0` 即 FAIL，`tools/vb_parity_compare.py:134,146-147`；如需放宽须给出明确容忍上限，不得默认）——这条防止靠丢检出让剩余配对满足第 2 条的假通过；
+  4. **每帧数量差 ≤ 上限**（`--count-diff`，默认 1，`tools/vb_parity_compare.py:143-144`）；
+
+  **待实现的附加检查**（工具改动另行立项，文档先立口径；以下**当前工具不检查**）：
+  5. **空结果显式处理**——工具现状与口径要求不一致，实测证据：
+     ```
+     # ref 0 检出 / got 1 检出，--count-diff 1（默认）
+     $ uv run python tools/vb_parity_compare.py --ref /tmp/ref2 --got /tmp/got2 --iou 0.9 --count-diff 1
+     parity_compare: frames=1 matched_pairs=0 mean_iou=nan worst_iou=1.0000@frame-1 max_count_diff=1 iou_threshold=0.9 count_diff_limit=1
+     parity_compare: PASS (1/1 frames)
+     exit=0
+     ```
+     即 **ref=0 / got=1 时工具 PASS，且 mean_iou=nan**（数量差 1 未超 `--count-diff` 上限，且 `ious` 为空使均值退化为 NaN）。待实现规则至少包含：
+     - `ref=0` 时要求 `got=0`（空参考不得用「数量差在限内」放行，即上述 case 应 FAIL）；
+     - 统计并报告**零检出帧占比**，避免整段空流以 `0/0` 静默达标；
+     - 出现 `mean_iou=nan` 时**不得**作为通过依据。
+
+  逐条对齐说明：第 1–4 条与工具一致；第 5 条是口径要求、待工具补齐。B1 已达标（box 0.0143 / meanIoU 0.9814、min 0.9745——逐对口径同样满足），引擎行 0 同口径复现 0.9814。
 - 逐流双消费者 `--faithfulness` 降级为**端到端诊断指标**，不得作为转换保真度判定。
 
 ## 5. parity 夹具的使用与边界
