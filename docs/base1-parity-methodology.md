@@ -12,7 +12,7 @@
 - `$WORK_DIR/evidence/quant-int8-fix-report.md`（扩 calib / kl_div / OL2 全部无效）
 - `$WORK_DIR/hq-eval/RESULT-head-hybrid-fp16.md`（head/PAN 转 fp16 无效）
 - `<parity-run-dir>/report-rknn-b1-input-int8-w8a16.md`（B1 离线达标 + 设备 gate 仍低）
-- `<parity-run-dir>/report-engine-row0-vs-harness.md`（**决定性**：引擎行 0 ≡ 独立 harness，gate 天花板归因画布差异）
+- `<parity-run-dir>/report-engine-row0-vs-harness.md`（**决定性**：引擎行 0 ≡ 独立 harness；gate 天花板成因给出画布差异假设，见 §4）
 - 夹具提交：`8d08bf4`（对齐夹具）→ `7a12eb6`（内容相位校验）→ `ed40553`（修 tpad/时间戳回归），对应报告 `report-parity-fixture-phase-check.md`；`report-parity-feed-regression-fix.md` **该文件不存在于 <parity-run-dir> 目录**（仅有 task 同名文件），其内容以提交 `ed40553` 为准。
 
 ---
@@ -53,17 +53,23 @@
   - **模拟器对量化模型推理确定性段错误**（`rknn/api/rknn.py:314`，aarch64 spark，`quant-int8-fix-report.md` blocker A/B）：主线程必崩；缓解 = 在 256MB 栈的 Python 线程里跑完整 build→init_runtime→inference 生命周期（3/3 成功，退出时 teardown 段错误无害）；hybrid step2 路径模型在线程内仍崩且 step2 必抛 `KeyError: '844'`（toolkit 内部 bug），**step2 须主线程跑、推理用线程**——或直接用设备侧 `rknn_dump` harness 验证（推荐，B1 即如此）。
   - toolkit 警告（记录，不影响结果）：input dtype float32→int8、output float32→float16 的提示，以及 `E RKNN: Unkown op target: 0` ×2（step2 仍 ret=0，导出成功）。
   - dataset.txt 必须是 build host 可见的绝对路径（否则报 `The image of /calib/001.jpg is invalid!`）。
-- **gate 注意**：B1 离线达标但当时逐流 gate 仍 0.815/0.821 FAIL——该天花板后来被决定性实验归因为画布差异（§4），不是 B1 模型问题。
+- **gate 注意**：B1 离线达标但当时逐流 gate 仍 0.815/0.821 FAIL——**最佳假设（best-supported hypothesis）**是该天花板由两侧解码栈画布差异主导（§4），不是 B1 模型问题。注意该假设尚未被独立证实：决定性实验对比的是 RK 画布 vs ffmpeg 重建（libav 下界估计），**不是 float 消费者真实输入画布**（float 侧此刻无画布 dump 钩子，见 §6-3），且来源报告中源帧（F0/F1）存在歧义；它可确证的是「两侧画布确有像素差」与「同一画布下引擎 ≡ harness」，画布差是否为历史 gate 失败的直接成因仍属推断，待验证。
 
 ## 4. gate 2 口径修正：改为「同一画布对比」
 
-- **为什么旧口径不可用**：逐流双消费者 `--faithfulness`（float-on-device vs RK，各自解码 RTSP 流）混入了两侧**解码栈画布差**。决定性实验实测（`report-engine-row0-vs-harness.md` §4）：MPP+RGA 画布 vs avdec/libswscale 画布逐像素差 **MAE 1.33–1.49（/255）、最大差 114、~37% 像素不同、>16 差异占 ~1%，差异集中在检出区**（bbox y[91,324] x[66,363]）。这个量级足以移动弱框/改变检出数，与「内容帧 FAIL、灰帧两侧一致」的 gate 失败模式吻合。其 0.82–0.86 的稳定天花板（fp16 0.8559 / B1 0.8211 / int8 0.7232，`report-rknn-b1-input-int8-w8a16.md` §7 对照表）是**测量地板**，不是模型/引擎问题——离线忠实度排序（fp16 ≈ B1 >> int8）与 gate 排序的矛盾即由此消解。
+- **为什么旧口径不可用**：逐流双消费者 `--faithfulness`（float-on-device vs RK，各自解码 RTSP 流）混入了两侧**解码栈画布差**。决定性实验实测（`report-engine-row0-vs-harness.md` §4）：MPP+RGA 画布 vs avdec/libswscale 画布逐像素差 **MAE 1.33–1.49（/255）、最大差 114、~37% 像素不同、>16 差异占 ~1%，差异集中在检出区**（bbox y[91,324] x[66,363]）。这个量级足以移动弱框/改变检出数，与「内容帧 FAIL、灰帧两侧一致」的 gate 失败模式吻合。其 0.82–0.86 的稳定天花板（fp16 0.8559 / B1 0.8211 / int8 0.7232，`report-rknn-b1-input-int8-w8a16.md` §7 对照表）**与画布差异的存在相容，最佳假设是测量地板而非模型/引擎问题**——但需注意：该实验对比的是 RK 画布 vs **ffmpeg 重建**，不是 float（gst_source）消费者的真实输入画布，且源帧归属（F0/F1）存在歧义，故「画布差异是历史 gate 天花板的成因」目前是**最佳假设，尚非决定性证明**。要证实需要：对比两侧消费者**真实且帧对齐的输入画布**——float 侧（gst_source）此刻**没有画布 dump 钩子**（见 §6-3），要么加钩子（属引擎改动），要么用等价方法构造 float 侧画布并证明其与引擎输入同帧同变换。可确证的部分仅为：上述逐像素差实测存在且集中于检出区；同一画布下引擎行 0 vs RKNN-harness 逐位一致（IoU 1.0000，§1）。
 - **新 gate 2 步骤模板**（已在决定性实验中完整跑通）：
   1. **引擎 dump 画布**：radxa 启动引擎 `VB_RK_DUMP_CANVAS=/out/…/canvas.raw`（dump 在第一次 `rknn_run` 后、`rknn_outputs_get` 前写画布 ⇒ 与 parity 行 0 同帧，`hybrid_rga_rknn.cpp:335-380`），`--frames 1` 得 1 行 parity.jsonl；
   2. **spark onnxruntime**：同一 canvas.raw（416×416×3，BGR 0-255）喂 `yolox_tiny.onnx`，得 float 参考 raw；
   3. **radxa `rknn_dump`**：同一 canvas.raw int8 native 喂 B1（或待测）.rknn，得设备 raw；
   4. **同一套引擎语义解码**：strides 8/16/32、row-major grid decode、obj×cls、thr 0.3、贪心 class-aware NMS 0.45（对齐 `core-cpp/vb/src/post/{decoder,yolox_decode,nms}.cpp`）；参考实现 `/tmp/row0_compare.py`（spark）。
-- **判据**（沿用离线口径）：box(0-3) mean err **≤ 0.02** 且解码 meanIoU **≥ 0.95**。B1 已达标（0.0143 / 0.9814），引擎行 0 同口径复现 0.9814。
+- **判据**（沿用离线口径并补齐数量/空结果项，与 `tools/vb_parity_compare.py` 实际检查项一致）——**全部满足**才算通过：
+  1. box(0-3) mean err **≤ 0.02**；
+  2. 解码 meanIoU **≥ 0.95**；
+  3. **未匹配的参考检出数 = 0**（即每帧每个参考检出都必须配对，`vb_parity_compare.py`：`unmatched > 0` 即 FAIL；如需放宽须给出明确容忍上限，不得默认）——这条防止靠丢检出让剩余配对满足 1/2 的假通过；
+  4. **每帧数量差 ≤ 1**（沿用 `vb_parity_compare.py` 的 `--count-diff` 语义，默认 1）；
+  5. **空结果处理**（显式规则，不得因「没有可配对的框」静默通过）：参考 0 检出而设备 >0 检出 → **FAIL**（数量差超限）；两侧都 0 → 记为该帧通过但**计入覆盖统计**（报告零检出帧占比，避免整段空流以 0/0 meanIoU 静默达标）。注意：`vb_parity_compare.py` 当前对「两侧都 0」的帧仅自然通过、未单列覆盖统计，新口径要求统计侧补充这一项（工具改动另行立项，文档先立口径）。
+  - B1 已达标（box 0.0143 / meanIoU 0.9814），引擎行 0 同口径复现 0.9814。
 - 逐流双消费者 `--faithfulness` 降级为**端到端诊断指标**，不得作为转换保真度判定。
 
 ## 5. parity 夹具的使用与边界
@@ -126,5 +132,5 @@ spark$ uv run python tools/vb_parity_compare.py --ref <float>/parity.jsonl --got
 ## 8. 报告间矛盾说明
 
 - `report-base1-gate2-faithfulness.md` 的「std 255→1 是根因」假设与 `report-base1-rknn-reconvert.md` 的证伪结果矛盾 → **以后者为准**（重转后设备检出逐位一致，引擎 sha256 强校验排除加载错文件）。
-- `report-base1-rknn-reconvert.md` 的「fp16 输入位型错乱导致 gate 偏低」单因解释与 `report-rknn-b1-input-int8-w8a16.md` 的 gate 排序矛盾 → **以 `report-engine-row0-vs-harness.md` 为最终结论**：gate 天花板由两侧解码栈画布差异主导，引擎路径逐位可信、B1 模型忠实。
+- `report-base1-rknn-reconvert.md` 的「fp16 输入位型错乱导致 gate 偏低」单因解释与 `report-rknn-b1-input-int8-w8a16.md` 的 gate 排序矛盾 → 引擎路径逐位可信、B1 模型忠实可由 `report-engine-row0-vs-harness.md` 直接确证；gate 天花板的成因以该报告的**最佳假设**为准（两侧画布差异主导），但如 §4 所述，画布差 ↔ 历史 gate 失败的因果链还需 float 侧真实画布对照才能坐实，标注为 best-supported hypothesis、待验证。
 - `report-parity-feed-regression-fix.md` 文件缺失，其对应改动以提交 `ed40553`（修 parity_feed 回归——恢复 tpad、pattern 改按帧序号定时）为准。
