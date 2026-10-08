@@ -24,6 +24,7 @@ jsonschema = pytest.importorskip("jsonschema")
 
 from vision_base.config import load
 from vision_base.supervisor import Supervisor
+import vision_base.supervisor as supervisor_module
 
 from fake_broker import FakeBroker  # noqa: E402
 
@@ -466,6 +467,40 @@ def test_single_process_shard_is_supervised_from_startup(tmp_path, broker):
         sup.stop()
 
 
+def test_initial_add_rejection_reaps_fake_runtime_and_hook_thread(
+        tmp_path, broker, monkeypatch):
+    """A real Shard startup failure must stop its fake runtime child and hook.
+
+    This keeps the supervisor in its existing workers=1 thread mode so the
+    assertion observes the resource ownership fixed by ShardWorker.run.
+    """
+    monkeypatch.setenv("FAKE_REJECT_STREAM", "cam-0")
+    cfg = make_config(tmp_path, broker, n_streams=1, per_worker=1, workers=1,
+                      backoff=0.3, device="vb-test-startup-cleanup")
+    stopped = []
+    original_stop = supervisor_module.Shard.stop
+
+    def recording_stop(shard, timeout_s=5.0):
+        pid = (shard._client.proc.pid if shard._client is not None
+               and shard._client.proc is not None else None)
+        original_stop(shard, timeout_s)
+        stopped.append((pid, shard._hook_thread))
+
+    monkeypatch.setattr(supervisor_module.Shard, "stop", recording_stop)
+    sup = Supervisor(cfg, runtime_argv=FAKE_ARGV)
+    try:
+        sup.start()
+        wait_for(lambda: stopped, timeout_s=30,
+                 what="failed startup resource cleanup")
+        pid, hook_thread = stopped[0]
+        assert pid is not None
+        wait_for(lambda: not pid_alive(pid), timeout_s=10,
+                 what="reaped fake runtime after initial add rejection")
+        assert not hook_thread.is_alive()
+    finally:
+        sup.stop()
+
+
 def test_add_stream_while_runtime_is_restarting_is_acked_not_ok(tmp_path, broker):
     """Review item 8: Shard.add_stream answers ok:false while the runtime is
     restarting; that verdict has to reach the ack."""
@@ -515,6 +550,265 @@ def test_new_shard_add_failure_is_acked_not_ok(tmp_path, broker, monkeypatch):
         assert [s["stream_id"] for s in sup.shards[0].streams] == ["cam-0"]
     finally:
         sup.stop()
+
+
+class _RunConn:
+    def __init__(self, messages=()):
+        self.messages = iter(messages)
+        self.sent = []
+
+    def send(self, message):
+        self.sent.append(message)
+
+    def recv(self):
+        return next(self.messages)
+
+
+def _worker_args(streams=()):
+    return {
+        "index": 0, "app_module": "fake:App", "config_dir": "",
+        "app_options": {}, "device_id": "test", "mqtt_host": "host",
+        "mqtt_port": 1883, "client_id": "client", "runtime_argv": [],
+        "runtime_cfg": {}, "state_dir": "/tmp/state", "topic_root": "root",
+        "streams": list(streams),
+    }
+
+
+def test_shard_worker_startup_failure_closes_each_owned_resource(monkeypatch):
+    events = []
+
+    class App:
+        def close(self):
+            events.append("app.close")
+
+    class Client:
+        connected = False
+        def __init__(self, *args, **kwargs):
+            events.append("client.create")
+        def connect(self, **kwargs):
+            events.append("client.connect")
+        def close(self):
+            events.append("client.close")
+
+    class Publisher:
+        def __init__(self, *args, **kwargs):
+            events.append("publisher.create")
+        def start(self):
+            events.append("publisher.start")
+        def close(self):
+            events.append("publisher.close")
+        def stats(self):
+            return {}
+
+    class Shard:
+        hello = None
+        def __init__(self, *args, **kwargs):
+            events.append("shard.create")
+        def start(self):
+            events.append("shard.start")
+        def add_stream(self, spec):
+            events.append("shard.add")
+            raise RuntimeError("initial add rejected")
+        def stop(self):
+            events.append("shard.stop")
+
+    monkeypatch.setattr(supervisor_module, "load_app", lambda *args: App())
+    monkeypatch.setattr(supervisor_module, "MqttClient", Client)
+    monkeypatch.setattr(supervisor_module, "PublishWorker", Publisher)
+    monkeypatch.setattr(supervisor_module, "Shard", Shard)
+
+    with pytest.raises(RuntimeError, match="initial add rejected"):
+        supervisor_module.ShardWorker(_worker_args([
+            {"stream_id": "cam-0", "url": "fake://0"}])).run(_RunConn())
+
+    assert events == [
+        "client.create", "client.connect", "publisher.create",
+        "publisher.start", "shard.create", "shard.start", "shard.add",
+        "shard.stop", "app.close", "publisher.close", "client.close",
+    ]
+
+
+@pytest.mark.parametrize("failure, expected", [
+    ("connect", ["client.create", "app.close", "client.close"]),
+    ("publisher_create", ["client.create", "app.close", "client.close"]),
+    ("publisher_start", ["client.create", "app.close", "publisher.close", "client.close"]),
+    ("shard_create", ["client.create", "app.close", "publisher.close", "client.close"]),
+    ("shard_start", ["client.create", "shard.stop", "app.close", "publisher.close", "client.close"]),
+])
+def test_shard_worker_partial_startup_closes_only_created_resources(
+        monkeypatch, failure, expected):
+    events = []
+
+    class App:
+        def close(self):
+            events.append("app.close")
+
+    class Client:
+        connected = False
+        def __init__(self, *args, **kwargs):
+            events.append("client.create")
+        def connect(self, **kwargs):
+            if failure == "connect":
+                raise RuntimeError("connect failed")
+        def close(self):
+            events.append("client.close")
+
+    class Publisher:
+        def __init__(self, *args, **kwargs):
+            if failure == "publisher_create":
+                raise RuntimeError("publisher create failed")
+        def start(self):
+            if failure == "publisher_start":
+                raise RuntimeError("publisher start failed")
+        def close(self):
+            events.append("publisher.close")
+
+    class Shard:
+        hello = None
+        def __init__(self, *args, **kwargs):
+            if failure == "shard_create":
+                raise RuntimeError("shard create failed")
+        def start(self):
+            if failure == "shard_start":
+                raise RuntimeError("shard start failed")
+        def stop(self):
+            events.append("shard.stop")
+
+    monkeypatch.setattr(supervisor_module, "load_app", lambda *args: App())
+    monkeypatch.setattr(supervisor_module, "MqttClient", Client)
+    monkeypatch.setattr(supervisor_module, "PublishWorker", Publisher)
+    monkeypatch.setattr(supervisor_module, "Shard", Shard)
+
+    with pytest.raises(RuntimeError):
+        supervisor_module.ShardWorker(_worker_args()).run(_RunConn())
+    assert events == expected
+
+
+def test_shard_worker_cleanup_continues_after_cleanup_error(monkeypatch):
+    events = []
+
+    class Resource:
+        def __init__(self, name, *, raises=False):
+            self.name = name
+            self.raises = raises
+        def close(self):
+            events.append(self.name)
+            if self.raises:
+                raise RuntimeError(self.name)
+        def start(self):
+            pass
+        def connect(self, **kwargs):
+            pass
+
+    app = Resource("app.close")
+    client = Resource("client.close")
+    publisher = Resource("publisher.close")
+
+    class Shard:
+        hello = None
+        def __init__(self, *args, **kwargs):
+            pass
+        def start(self):
+            pass
+        def stop(self):
+            events.append("shard.stop")
+            raise RuntimeError("shard.stop")
+
+    monkeypatch.setattr(supervisor_module, "load_app", lambda *args: app)
+    monkeypatch.setattr(supervisor_module, "MqttClient", lambda *args, **kwargs: client)
+    monkeypatch.setattr(supervisor_module, "PublishWorker", lambda *args, **kwargs: publisher)
+    monkeypatch.setattr(supervisor_module, "Shard", Shard)
+
+    conn = _RunConn([{"op": "stop"}])
+    supervisor_module.ShardWorker(_worker_args()).run(conn)
+    assert events == ["shard.stop", "app.close", "publisher.close", "client.close"]
+
+
+def test_shard_worker_cleanup_continues_when_cleanup_attribute_raises(monkeypatch):
+    events = []
+
+    class App:
+        def __getattribute__(self, name):
+            if name == "close":
+                raise RuntimeError("close lookup failed")
+            return super().__getattribute__(name)
+
+    class Resource:
+        connected = False
+        def __init__(self, name):
+            self.name = name
+        def connect(self, **kwargs):
+            pass
+        def start(self):
+            pass
+        def close(self):
+            events.append(self.name)
+        def stats(self):
+            return {}
+
+    class Shard:
+        hello = None
+        def __init__(self, *args, **kwargs):
+            pass
+        def start(self):
+            pass
+        def stop(self):
+            events.append("shard.stop")
+
+    monkeypatch.setattr(supervisor_module, "load_app", lambda *args: App())
+    monkeypatch.setattr(supervisor_module, "MqttClient",
+                        lambda *args, **kwargs: Resource("client.close"))
+    monkeypatch.setattr(supervisor_module, "PublishWorker",
+                        lambda *args, **kwargs: Resource("publisher.close"))
+    monkeypatch.setattr(supervisor_module, "Shard", Shard)
+
+    supervisor_module.ShardWorker(_worker_args()).run(_RunConn([{"op": "stop"}]))
+    assert events == ["shard.stop", "publisher.close", "client.close"]
+
+
+def test_shard_worker_normal_stop_closes_app_once(monkeypatch):
+    calls = []
+
+    class App:
+        def close(self):
+            calls.append("app.close")
+
+    class Client:
+        connected = False
+        def __init__(self, *args, **kwargs):
+            pass
+        def connect(self, **kwargs):
+            pass
+        def close(self):
+            calls.append("client.close")
+
+    class Publisher:
+        def __init__(self, *args, **kwargs):
+            pass
+        def start(self):
+            pass
+        def close(self):
+            calls.append("publisher.close")
+        def stats(self):
+            return {}
+
+    class Shard:
+        hello = None
+        def __init__(self, *args, **kwargs):
+            pass
+        def start(self):
+            pass
+        def stop(self):
+            calls.append("shard.stop")
+
+    monkeypatch.setattr(supervisor_module, "load_app", lambda *args: App())
+    monkeypatch.setattr(supervisor_module, "MqttClient", Client)
+    monkeypatch.setattr(supervisor_module, "PublishWorker", Publisher)
+    monkeypatch.setattr(supervisor_module, "Shard", Shard)
+
+    supervisor_module.ShardWorker(_worker_args()).run(_RunConn([{"op": "stop"}]))
+    assert calls.count("app.close") == 1
+    assert calls == ["shard.stop", "app.close", "publisher.close", "client.close"]
 
 
 def test_restart_reaps_a_stalled_shard(tmp_path, broker):

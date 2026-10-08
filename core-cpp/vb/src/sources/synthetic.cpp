@@ -6,6 +6,7 @@
 //   - fail_at_seq: read() returns -1 once when seq reaches that value
 //     (used by test_pool to exercise the reconnect path).
 #include <climits>
+#include <algorithm>
 #include <mutex>
 #include <chrono>
 #include <cmath>
@@ -71,6 +72,7 @@ int query_int32(const std::map<std::string, std::string>& q, const char* key, in
 
 struct SyntheticParams {
     int w = 1280, h = 720, fps = 15, boxes = 3;
+    int open_delay_ms = 0, read_delay_ms = 0;  // deterministic test controls
     uint64_t fail_at_seq = 0;  // 0 = never fail
 
     static SyntheticParams from_url(const std::string& url) {
@@ -80,6 +82,8 @@ struct SyntheticParams {
         p.h = query_int32(q, "h", p.h);
         p.fps = query_int32(q, "fps", p.fps);
         p.boxes = query_int32(q, "boxes", p.boxes);
+        p.open_delay_ms = std::max(0, query_int32(q, "open_delay_ms", 0));
+        p.read_delay_ms = std::max(0, query_int32(q, "read_delay_ms", 0));
         p.fail_at_seq = static_cast<uint64_t>(query_int(q, "fail_at_seq", 0));
         if (p.w <= 0) p.w = 1280;
         if (p.h <= 0) p.h = 720;
@@ -96,6 +100,8 @@ public:
 
     bool open(std::string& err) override {
         (void)err;
+        if (p_.open_delay_ms > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(p_.open_delay_ms));
         std::lock_guard<std::mutex> lk(mu_);
         next_tick_s_ = now_s();
         return true;
@@ -103,6 +109,8 @@ public:
 
     int read(FrameBuf& out, int timeout_ms) override {
         (void)timeout_ms;  // pacing below already bounds the wait
+        if (p_.read_delay_ms > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(p_.read_delay_ms));
         double target;
         {
             std::lock_guard<std::mutex> lk(mu_);
@@ -141,6 +149,8 @@ public:
         out.fmt = PixFmt::RGB888;
         out.mem = Mem::Host;
         out.host = pixels->data();
+        out.full_host = out.host;
+        out.full_stride = out.stride;
         out.full_w = p_.w;
         out.full_h = p_.h;
         out.hold = pixels;

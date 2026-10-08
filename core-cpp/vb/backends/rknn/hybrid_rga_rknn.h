@@ -12,12 +12,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "vb/types.h"
 
 namespace vb {
+
+struct FrameBuf;
+std::mutex& rknn_rga_mutex();
 
 // One RKNN output tensor, batch dimension kept as reported by
 // RKNN_QUERY_OUTPUT_ATTR (the adapter drops it when it is 1).
@@ -50,7 +54,11 @@ public:
     //
     // Returns 0 on success, negative on failure with err set.
     int infer_nv12_fd(int src_fd, int src_w, int src_h, int y_stride,
-                      double* rga_ms, double* rknn_ms, std::string& err);
+                      double* rga_ms, double* rknn_ms, std::string& err,
+                      int src_hstride = 0);
+
+    bool copy_snapshot_rgb(const FrameBuf& frame, std::vector<uint8_t>& pixels,
+                           int& w, int& h, std::string& err);
 
     // Flat, output-major float outputs of the most recent infer_nv12_fd().
     const float* flat() const { return flat_.data(); }

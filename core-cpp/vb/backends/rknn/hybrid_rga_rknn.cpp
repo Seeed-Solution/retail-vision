@@ -32,10 +32,12 @@
 #include <vector>
 
 #include "hybrid_rga_rknn.h"
+#include "vb/backend.h"
+#include "vb/rate_crop.h"
 
 #include "rga/im2d.h"
 #include "rga/rga.h"
-#include "rknn/rknn_api.h"
+#include "rknn_api.h"
 
 namespace vb {
 namespace {
@@ -88,6 +90,8 @@ bool dimensions(const rknn_tensor_attr& attr, int* width, int* height) {
 
 }  // namespace
 
+std::mutex& rknn_rga_mutex() { return g_rga_mutex; }
+
 struct RknnHybrid::Impl {
     rknn_context ctx{};
     rknn_tensor_attr input_native{};
@@ -96,12 +100,16 @@ struct RknnHybrid::Impl {
     std::vector<rknn_tensor_attr> output_native;
     std::vector<rknn_tensor_attr> output_logical;
     std::vector<rknn_tensor_mem*> output_mems;
+    rknn_tensor_mem* snapshot_mem = nullptr;
+    size_t snapshot_bytes = 0;
+    int snapshot_pitch = 0;
     std::mutex run_mutex;
 
     ~Impl() {
         for (auto* mem : output_mems)
             if (mem) rknn_destroy_mem(ctx, mem);
         if (input_mem) rknn_destroy_mem(ctx, input_mem);
+        if (snapshot_mem) rknn_destroy_mem(ctx, snapshot_mem);
         if (ctx) rknn_destroy(ctx);
     }
 };
@@ -109,6 +117,98 @@ struct RknnHybrid::Impl {
 RknnHybrid::RknnHybrid() : impl_(new Impl()) {}
 
 RknnHybrid::~RknnHybrid() = default;
+
+bool RknnHybrid::copy_snapshot_rgb(const FrameBuf& frame,
+                                   std::vector<uint8_t>& pixels, int& w, int& h,
+                                   std::string& err) {
+    pixels.clear();
+    w = 0;
+    h = 0;
+    err.clear();
+    const int source_w = frame.full_w > 0 ? frame.full_w : frame.w;
+    const int source_h = frame.full_h > 0 ? frame.full_h : frame.h;
+    if (frame.mem != Mem::DmaBuf || frame.fmt != PixFmt::NV12 ||
+        frame.dmabuf_fd < 0 || frame.w <= 0 || frame.h <= 0 ||
+        (frame.full_w > 0 && frame.full_w != frame.w) ||
+        (frame.full_h > 0 && frame.full_h != frame.h) || frame.crop_x0 != 0 ||
+        frame.crop_y0 != 0 || source_w != frame.w || source_h != frame.h) {
+        err = "rknn snapshot requires a complete NV12 DMA-BUF source";
+        return false;
+    }
+    size_t source_bytes = 0;
+    if (!nv12_storage_bytes(source_w, source_h, frame.stride, frame.hstride,
+                            source_bytes)) {
+        err = "rknn snapshot source NV12 layout is invalid";
+        return false;
+    }
+    const size_t tight_row = static_cast<size_t>(source_w) * 3u;
+    if (tight_row > kMaxHostRgbBytes ||
+        static_cast<size_t>(source_h) > kMaxHostRgbBytes / tight_row) {
+        err = "rknn snapshot RGB layout exceeds 64 MiB";
+        return false;
+    }
+    const int pitch = (source_w + 15) & ~15;
+    if (pitch < source_w || static_cast<size_t>(pitch) > kMaxHostRgbBytes / 3u ||
+        static_cast<size_t>(source_h) >
+            kMaxHostRgbBytes / (static_cast<size_t>(pitch) * 3u)) {
+        err = "rknn snapshot padded RGB layout exceeds 64 MiB";
+        return false;
+    }
+    const size_t padded_bytes = static_cast<size_t>(pitch) *
+                                static_cast<size_t>(source_h) * 3u;
+    const size_t tight_bytes = tight_row * static_cast<size_t>(source_h);
+    Impl& s = *impl_;
+    std::lock_guard<std::mutex> run_guard(s.run_mutex);
+    if (!s.snapshot_mem || s.snapshot_pitch != pitch ||
+        s.snapshot_bytes < padded_bytes) {
+        rknn_tensor_mem* next = rknn_create_mem(s.ctx, padded_bytes);
+        if (!next || next->fd < 0 || !next->virt_addr || next->size < padded_bytes) {
+            if (next) rknn_destroy_mem(s.ctx, next);
+            err = "rknn snapshot scratch allocation/mapping failed";
+            return false;
+        }
+        if (s.snapshot_mem) rknn_destroy_mem(s.ctx, s.snapshot_mem);
+        s.snapshot_mem = next;
+        s.snapshot_bytes = next->size;
+        s.snapshot_pitch = pitch;
+    }
+    const int source_hstride = frame.hstride == 0 ? source_h : frame.hstride;
+    rga_buffer_t src = wrapbuffer_fd(frame.dmabuf_fd, source_w, source_h,
+                                     RK_FORMAT_YCbCr_420_SP, frame.stride,
+                                     source_hstride);
+    rga_buffer_t dst = wrapbuffer_fd(s.snapshot_mem->fd, source_w, source_h,
+                                     RK_FORMAT_RGB_888, pitch, source_h);
+    im_rect rect{0, 0, source_w, source_h};
+    IM_STATUS status;
+    int sync_rc = RKNN_SUCC;
+    {
+        std::lock_guard<std::mutex> rga_guard(rknn_rga_mutex());
+        status = improcess(src, dst, {}, rect, rect, {}, -1, nullptr, nullptr,
+                           IM_SYNC);
+        if (status == IM_STATUS_SUCCESS) {
+            sync_rc = rknn_mem_sync(s.ctx, s.snapshot_mem,
+                                    RKNN_MEMORY_SYNC_FROM_DEVICE);
+            if (sync_rc != RKNN_SUCC)
+                err = "rknn snapshot mem sync from device=" +
+                      std::to_string(sync_rc);
+        }
+    }
+    if (status != IM_STATUS_SUCCESS || sync_rc != RKNN_SUCC) {
+        if (err.empty())
+            err = std::string("rknn snapshot RGA=") + std::to_string(status) +
+                  " " + imStrError(status);
+        return false;
+    }
+    std::vector<uint8_t> next_pixels(tight_bytes);
+    const auto* base = static_cast<const uint8_t*>(s.snapshot_mem->virt_addr);
+    for (int y = 0; y < source_h; ++y)
+        std::memcpy(next_pixels.data() + static_cast<size_t>(y) * tight_row,
+                    base + static_cast<size_t>(y) * pitch * 3u, tight_row);
+    pixels.swap(next_pixels);
+    w = source_w;
+    h = source_h;
+    return true;
+}
 
 std::unique_ptr<RknnHybrid> RknnHybrid::create(const std::string& model_path,
                                                uint32_t core_mask,
@@ -264,12 +364,14 @@ std::unique_ptr<RknnHybrid> RknnHybrid::create(const std::string& model_path,
 }
 
 int RknnHybrid::infer_nv12_fd(int src_fd, int src_w, int src_h, int y_stride,
-                              double* rga_ms, double* rknn_ms, std::string& err) {
+                              double* rga_ms, double* rknn_ms, std::string& err,
+                              int src_hstride) {
     err.clear();
-    if (src_fd < 0 || src_w <= 0 || src_h <= 0 || y_stride < src_w) {
+    size_t source_bytes = 0;
+    if (src_fd < 0 || !nv12_storage_bytes(src_w, src_h, y_stride, src_hstride, source_bytes)) {
         err = "invalid NV12 source: fd=" + std::to_string(src_fd) +
               " size=" + std::to_string(src_w) + "x" + std::to_string(src_h) +
-              " y_stride=" + std::to_string(y_stride);
+              " y_stride=" + std::to_string(y_stride) + " hstride=" + std::to_string(src_hstride);
         return -1;
     }
     Impl& s = *impl_;
@@ -279,25 +381,19 @@ int RknnHybrid::infer_nv12_fd(int src_fd, int src_w, int src_h, int y_stride,
                                ? static_cast<int>(s.input_native.w_stride)
                                : width_;
     const LetterboxGeom geom =
-        LetterboxGeom::fit(src_w, src_h, width_, height_, Align::Center);
+        LetterboxGeom::fit(src_w, src_h, width_, height_, input_.align);
     int scaled_w = py_round(static_cast<float>(src_w) * geom.scale);
     int scaled_h = py_round(static_cast<float>(src_h) * geom.scale);
-    int dst_x = (width_ - scaled_w) / 2;
-    int dst_y = (height_ - scaled_h) / 2;
-    // fit() derives pad_x/pad_y the same way; a mismatch would mean RGA writes
-    // the image somewhere other than the geometry the decoder is told about.
-    if (dst_x != static_cast<int>(geom.pad_x) ||
-        dst_y != static_cast<int>(geom.pad_y)) {
-        err = "letterbox geometry mismatch: rect=" + std::to_string(dst_x) + "," +
-              std::to_string(dst_y) + " geom=" + std::to_string(geom.pad_x) + "," +
-              std::to_string(geom.pad_y);
-        return -2;
-    }
+    // LetterboxGeom is the single source of truth for alignment and integer
+    // padding. In particular, top_left keeps both offsets at zero.
+    int dst_x = static_cast<int>(geom.pad_x);
+    int dst_y = static_cast<int>(geom.pad_y);
     scaled_w = std::min(std::max(scaled_w, 1), width_ - dst_x);
     scaled_h = std::min(std::max(scaled_h, 1), height_ - dst_y);
 
     rga_buffer_t src = wrapbuffer_fd(src_fd, src_w, src_h,
-                                     RK_FORMAT_YCbCr_420_SP, y_stride, src_h);
+                                     RK_FORMAT_YCbCr_420_SP, y_stride,
+                                     src_hstride == 0 ? src_h : src_hstride);
     // The canvas is what the model sees, so its channel order comes from
     // backend.input (defaulted by decoder family), not from the frame format.
     const auto rga_fmt = (input_.color_order == ColorOrder::BGR)

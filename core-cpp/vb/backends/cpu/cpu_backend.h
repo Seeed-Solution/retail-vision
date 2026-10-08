@@ -5,10 +5,14 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <onnxruntime_c_api.h>
 
 #include "vb/backend.h"
 
 namespace vb {
+
+const OrtApi* cpu_ort_api();
+OrtEnv* cpu_ort_env(std::string& err);
 
 // Resource bounds, all checked before anything is allocated. §7 keeps models
 // external, so a model path is untrusted input like any other config value.
@@ -43,5 +47,6 @@ inline bool cpu_vbt1_dtype(int32_t ort_element_type, uint8_t& vbt1_dtype,
 //   model_sha256 (opt)     expected SHA-256 of the model file; the file is
 //                          read once, verified, and loaded from those bytes
 std::unique_ptr<Backend> make_cpu_backend(const std::string& backend_json, std::string& err);
+std::unique_ptr<Stage2Context> make_cpu_stage2(const Stage2Spec& spec, std::string& err);
 
 }  // namespace vb

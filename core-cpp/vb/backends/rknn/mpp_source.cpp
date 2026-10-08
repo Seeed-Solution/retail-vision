@@ -199,6 +199,10 @@ public:
         int w = 0;
         int h = 0;
         int y_stride = 0;
+        int uv_stride = 0;
+        int planes = 0;
+        int hstride = 0;
+        size_t layout_bytes = 0;
         gsize y_off = 0;
         gsize uv_off = 0;
         if (why.empty()) {
@@ -212,17 +216,21 @@ public:
             // one; the caps-derived GstVideoInfo stays the fallback.
             GstVideoMeta* vmeta = gst_buffer_get_video_meta(buf);
             if (vmeta) {
+                if (vmeta->format != GST_VIDEO_FORMAT_NV12)
+                    why = "decoded GstVideoMeta is not NV12";
                 w = static_cast<int>(vmeta->width);
                 h = static_cast<int>(vmeta->height);
                 y_stride = static_cast<int>(vmeta->stride[0]);
+                planes = static_cast<int>(vmeta->n_planes);
+                uv_stride = planes == 2 ? vmeta->stride[1] : 0;
                 y_off = vmeta->offset[0];
-                uv_off = vmeta->n_planes > 1
-                             ? vmeta->offset[1]
-                             : static_cast<gsize>(y_stride) * static_cast<gsize>(h);
+                uv_off = planes == 2 ? vmeta->offset[1] : 0;
             } else {
                 w = static_cast<int>(GST_VIDEO_INFO_WIDTH(&info));
                 h = static_cast<int>(GST_VIDEO_INFO_HEIGHT(&info));
                 y_stride = GST_VIDEO_INFO_PLANE_STRIDE(&info, 0);
+                planes = GST_VIDEO_INFO_N_PLANES(&info);
+                uv_stride = GST_VIDEO_INFO_PLANE_STRIDE(&info, 1);
                 y_off = GST_VIDEO_INFO_PLANE_OFFSET(&info, 0);
                 uv_off = GST_VIDEO_INFO_PLANE_OFFSET(&info, 1);
             }
@@ -230,12 +238,6 @@ public:
                 why = "invalid NV12 geometry from mppvideodec";
             } else if (y_stride < w) {
                 why = "invalid NV12 Y stride from mppvideodec";
-            } else if (y_off != 0 || uv_off != static_cast<gsize>(y_stride) * h) {
-                // RGA wraps one fd with no plane offset; NV12 is expressible
-                // only when the UV plane follows the Y plane contiguously.
-                why = "NV12 planes are not contiguous (Y off=" + std::to_string(y_off) +
-                      " UV off=" + std::to_string(uv_off) + " stride=" +
-                      std::to_string(y_stride) + " h=" + std::to_string(h) + ")";
             }
         }
         int fd = -1;
@@ -247,8 +249,23 @@ public:
                 if (!mem || !gst_is_dmabuf_memory(mem)) {
                     why = "GstMemory is not DMA-BUF";
                 } else {
-                    fd = gst_dmabuf_memory_get_fd(mem);
-                    if (fd < 0) why = "gst_dmabuf_memory_get_fd returned a negative fd";
+                    // get_sizes returns valid data size, not maximum allocation
+                    // capacity; fd wrapping also requires valid data at fd offset 0.
+                    gsize memory_offset = 0;
+                    const gsize memory_size = gst_memory_get_sizes(mem, &memory_offset, nullptr);
+                    if (!nv12_dmabuf_layout(w, h, y_stride, uv_stride, planes,
+                                           y_off, uv_off, memory_offset, memory_size,
+                                           hstride, layout_bytes)) {
+                        why = "unsupported NV12 DMA-BUF layout (Y off=" + std::to_string(y_off) +
+                              " UV off=" + std::to_string(uv_off) + " Y stride=" +
+                              std::to_string(y_stride) + " UV stride=" + std::to_string(uv_stride) +
+                              " planes=" + std::to_string(planes) + " h=" + std::to_string(h) +
+                              " memory offset=" + std::to_string(memory_offset) +
+                              " memory size=" + std::to_string(memory_size) + ")";
+                    } else {
+                        fd = gst_dmabuf_memory_get_fd(mem);
+                        if (fd < 0) why = "gst_dmabuf_memory_get_fd returned a negative fd";
+                    }
                 }
             }
         }
@@ -271,8 +288,7 @@ public:
             nv12_dumped_ = true;
             const char* nv12_path = std::getenv("VB_RK_DUMP_NV12");
             if (nv12_path && *nv12_path) {
-                const size_t want =
-                    static_cast<size_t>(y_stride) * static_cast<size_t>(h) * 3 / 2;
+                const size_t want = layout_bytes;
                 void* mapped = mmap(nullptr, want, PROT_READ, MAP_SHARED, fd, 0);
                 if (mapped != MAP_FAILED) {
                     std::FILE* nf = std::fopen(nv12_path, "wb");
@@ -281,9 +297,9 @@ public:
                         std::fclose(nf);
                         std::fprintf(
                             stderr,
-                            "rknn source: NV12 %dx%d y_stride=%d uv_off=%zu "
+                            "rknn source: NV12 %dx%d y_stride=%d hstride=%d uv_off=%zu "
                             "%zu bytes -> %s\n",
-                            w, h, y_stride, static_cast<size_t>(uv_off), want,
+                            w, h, y_stride, hstride, static_cast<size_t>(uv_off), want,
                             nv12_path);
                     }
                     munmap(mapped, want);
@@ -306,6 +322,7 @@ public:
         out.w = w;
         out.h = h;
         out.stride = y_stride;
+        out.hstride = hstride;
         out.fmt = PixFmt::NV12;
         out.mem = Mem::DmaBuf;
         out.host = nullptr;

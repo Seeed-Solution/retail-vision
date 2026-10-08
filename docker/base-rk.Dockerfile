@@ -26,9 +26,12 @@ ARG DEBIAN_DIGEST=sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004
 
 FROM debian:bookworm-slim@${DEBIAN_DIGEST} AS build
 ARG TARGETARCH
+ARG APT_MIRROR=http://deb.debian.org
 ARG ORT_VERSION=1.20.1
 ARG ORT_SHA256_AARCH64=ae4fedbdc8c18d688c01306b4b50c63de3445cdf2dbd720e01a2fa3810b8106a
 ARG ORT_SHA256_X64=67db4dc1561f1e3fd42e619575c82c601ef89849afc7ea85a003abbac1a1a105
+ARG ORT_URL=
+ARG BUILD_JOBS=8
 
 # Rockchip SDK inputs, all fetched here and all sha256-pinned:
 #   rknn_api.h   airockchip/rknn-toolkit2 v2.3.2 (proprietary; see THIRD_PARTY.md)
@@ -41,8 +44,18 @@ ARG RKNN_LIB_SHA256=d31fc19c85b85f6091b2bd0f6af9d962d5264a4e410bfb536402ec92bac7
 ARG RGA_LIB_URL=https://raw.githubusercontent.com/airockchip/librga/fb3357d09008222bc5e27bdaadf74a0c5ea4c86e/libs/Linux/gcc-aarch64/librga.so
 ARG RGA_LIB_SHA256=3da1413445885420abf00821640ec8a37289ec176fe4ffeee0de5f68418ed50e
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake pkg-config ca-certificates curl \
+RUN apt_bootstrap_mirror="$(printf '%s' "${APT_MIRROR}" | sed 's|^https://|http://|')" \
+    && sed -i \
+        -e "s|http://deb.debian.org/debian|${apt_bootstrap_mirror}/debian|g" \
+        -e "s|http://deb.debian.org/debian-security|${apt_bootstrap_mirror}/debian-security|g" \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && sed -i \
+        -e "s|${apt_bootstrap_mirror}/debian|${APT_MIRROR}/debian|g" \
+        -e "s|${apt_bootstrap_mirror}/debian-security|${APT_MIRROR}/debian-security|g" \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake pkg-config curl \
         libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
         libturbojpeg0-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -54,8 +67,9 @@ RUN case "${TARGETARCH}" in \
       amd64) ort_sha="${ORT_SHA256_X64}";  ort_arch=x64 ;; \
       *) echo "unsupported TARGETARCH ${TARGETARCH}" >&2; exit 1 ;; \
     esac \
+    && ort_url="${ORT_URL:-https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-${ort_arch}-${ORT_VERSION}.tgz}" \
     && curl -fsSL -o /tmp/ort.tgz \
-       "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-${ort_arch}-${ORT_VERSION}.tgz" \
+       "${ort_url}" \
     && echo "${ort_sha}  /tmp/ort.tgz" | sha256sum -c - \
     && mkdir -p /opt/onnxruntime \
     && tar -xzf /tmp/ort.tgz -C /opt/onnxruntime --strip-components=1 \
@@ -87,25 +101,37 @@ RUN cmake -S /src/core-cpp/vb -B /tmp/vb-build -DCMAKE_BUILD_TYPE=Release \
         -DVB_WITH_GST=ON -DVB_WITH_JPEG=ON -DVB_WITH_TLS=ON \
         -DORT_ROOT=/opt/onnxruntime \
         -DRKNN_LIB_DIR=/opt/rk -DRGA_LIB_DIR=/opt/rk \
-    && cmake --build /tmp/vb-build -j"$(nproc)" \
+    && cmake --build /tmp/vb-build -j"${BUILD_JOBS}" \
     && mkdir -p /out/vb/bin /out/vb/py \
     && cp /tmp/vb-build/vb-runtime /out/vb/bin/ \
     && cp -r /src/core-cpp/vb /out/vb/src
 
 FROM debian:bookworm-slim@${DEBIAN_DIGEST} AS runtime
 ARG TARGETARCH
+ARG APT_MIRROR=http://deb.debian.org
 
 # No Rockchip library, no RKNN header and no Python compute library: the boards
 # supply librknnrt.so / librga.so / librockchip_mpp.so.1 and the Rockchip
 # GStreamer plugin as read-only host mounts. What is installed here is the
-# GStreamer core plus plugins-good (rtspsrc, rtph264depay/rtph265depay — the
-# same split the fall-detection RK image uses), OpenSSL, libturbojpeg and a
-# stdlib python3 for vision_base.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates python3 \
+# GStreamer core plus plugins-good (rtspsrc and RTP depayloaders) and
+# plugins-bad (h264parse/h265parse), OpenSSL, libturbojpeg and a stdlib python3
+# for vision_base. gstreamer1.0-tools provides gst-inspect-1.0 for diagnostics.
+RUN apt_bootstrap_mirror="$(printf '%s' "${APT_MIRROR}" | sed 's|^https://|http://|')" \
+    && sed -i \
+        -e "s|http://deb.debian.org/debian|${apt_bootstrap_mirror}/debian|g" \
+        -e "s|http://deb.debian.org/debian-security|${apt_bootstrap_mirror}/debian-security|g" \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && sed -i \
+        -e "s|${apt_bootstrap_mirror}/debian|${APT_MIRROR}/debian|g" \
+        -e "s|${apt_bootstrap_mirror}/debian-security|${APT_MIRROR}/debian-security|g" \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
         libssl3 libturbojpeg0 \
         libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
-        gstreamer1.0-plugins-good \
+        gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+        gstreamer1.0-tools \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/vb/bin/vb-runtime /opt/vb/bin/vb-runtime

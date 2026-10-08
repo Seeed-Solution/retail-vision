@@ -31,12 +31,16 @@ add_library(vb_algo STATIC
     src/post/yolov8_decode.cpp
     src/post/classify.cpp
     src/post/decoder.cpp
+    src/post/ctc_greedy.cpp
+    src/text_match.cpp
     src/analyzers/motion_util.cpp
     src/analyzers/dwell.cpp
     src/analyzers/speed.cpp
     src/analyzers/direction.cpp
     src/analyzers/count_threshold.cpp
     src/analyzers/pose_angle.cpp
+    src/analyzers/text_vote.cpp
+    src/analyzers/slot_coverage.cpp
 )
 add_library(vb::algo ALIAS vb_algo)
 set_target_properties(vb_algo PROPERTIES EXPORT_NAME algo)
@@ -57,6 +61,8 @@ add_library(vb_core STATIC
     src/stats.cpp
     src/pool.cpp
     src/runtime.cpp
+    src/rate_crop.cpp
+    src/stage2.cpp
     src/backend_registry.cpp
     src/sources/synthetic.cpp
     src/dev_tensor.cpp
@@ -138,6 +144,7 @@ set(VB_INSTALL_HEADERS
     include/vb/post.h
     include/vb/tracker.h
     include/vb/types.h
+    include/vb/text_match.h
     include/vb/vb_analyzer_abi.h
     include/vb/wire.h
 )
@@ -189,6 +196,17 @@ foreach(_backend IN LISTS VB_BACKENDS)
         message(STATUS "vb: backend ${_backend} sources absent, skipping")
     endif()
 endforeach()
+
+# The CPU adapter is an optional stage2 provider. Wire it once, after all
+# backend subdirectories have declared their targets, so vb_core's runtime
+# factory can use it without making the child consume vb-runtime directly.
+if(TARGET vb_cpu)
+    target_compile_definitions(vb_core PRIVATE VB_HAVE_CPU_BACKEND=1)
+    target_link_libraries(vb_core PRIVATE vb_cpu)
+    # Static registration has no referenced symbol: retain its OBJECT files
+    # directly in the executable instead of relying on archive extraction.
+    target_link_libraries(vb-runtime PRIVATE vb_cpu)
+endif()
 
 if(VB_TESTS)
     enable_testing()
@@ -258,6 +276,37 @@ if(VB_TESTS)
     target_link_libraries(test_decoder PRIVATE vb_core)
     add_test(NAME decoder COMMAND test_decoder
         ${CMAKE_CURRENT_SOURCE_DIR}/../../contracts/fixtures/vb)
+
+    add_executable(test_text_vote tests/test_text_vote.cpp)
+    target_link_libraries(test_text_vote PRIVATE vb_core)
+    add_test(NAME text_vote COMMAND test_text_vote)
+    add_test(NAME text_match_fixture COMMAND vb_selftest textmatch
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../contracts/fixtures/vb/text_match_case1.json)
+    foreach(ctc_case ctc_case1 ctc_case2 ctc_case3)
+        add_test(NAME ${ctc_case} COMMAND vb_selftest ctc
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../contracts/fixtures/vb/${ctc_case}.json)
+    endforeach()
+    add_test(NAME text_match_cn_fixture COMMAND vb_selftest textmatch
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../contracts/fixtures/vb/text_match_cn.json)
+    add_test(NAME text_match_de_fixture COMMAND vb_selftest textmatch
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../contracts/fixtures/vb/text_match_de.json)
+
+    add_executable(test_slot tests/test_slot.cpp)
+    target_link_libraries(test_slot PRIVATE vb_core)
+    add_test(NAME slot COMMAND test_slot
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../contracts/fixtures/vb/analyzers)
+
+    add_executable(test_stage2 tests/test_stage2.cpp)
+    target_link_libraries(test_stage2 PRIVATE vb_core)
+    add_test(NAME stage2 COMMAND test_stage2)
+    add_executable(test_stage2_runtime tests/test_stage2_runtime.cpp)
+    target_link_libraries(test_stage2_runtime PRIVATE vb_core)
+    add_test(NAME stage2_runtime COMMAND test_stage2_runtime)
+    set_tests_properties(stage2_runtime PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 10)
+
+    add_executable(test_rate_crop tests/test_rate_crop.cpp)
+    target_link_libraries(test_rate_crop PRIVATE vb_core)
+    add_test(NAME rate_crop COMMAND test_rate_crop)
 
     add_library(count_plugin MODULE tests/plugins/count_plugin.c)
     set_target_properties(count_plugin PROPERTIES PREFIX "" SUFFIX ".so")

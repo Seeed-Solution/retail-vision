@@ -1,0 +1,5 @@
+{
+  "analyzer": "text_vote",
+  "config": {"source": "stage2"},
+  "expect_configure_error": "text_vote needs stage2"
+}

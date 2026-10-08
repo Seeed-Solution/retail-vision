@@ -707,6 +707,7 @@ int main(int argc, char** argv) {
         std::string err;
         CHECK(rt->start(err));
         rt->handle_line(add_line(0, "synthetic://?w=64&h=48&fps=30", Json::array()));
+        CHECK(wait_until([&] { return rt->stream(0) != nullptr; }));
         auto s = rt->stream(0);
         CHECK(s != nullptr);
         // Wait until a context thread is inside process() for this stream.
@@ -743,6 +744,7 @@ int main(int argc, char** argv) {
         CHECK(rt->start(err));
         rt->handle_line(add_line(0, "synthetic://?w=64&h=48&fps=60", Json::array()));
         rt->handle_line(add_line(1, "synthetic://?w=64&h=48&fps=60", Json::array()));
+        CHECK(wait_until([&] { return rt->stream(1) != nullptr; }));
         auto s1 = rt->stream(1);
         CHECK(s1 != nullptr);
         CHECK(wait_until([&] { return busy(s1); }, 4000));
@@ -781,13 +783,15 @@ int main(int argc, char** argv) {
         CHECK(rt->start(err));
         rt->handle_line(add_line(0, "synthetic://?w=64&h=48&fps=60", Json::array()));
         rt->handle_line(add_line(1, "synthetic://?w=64&h=48&fps=60", Json::array()));
+        CHECK(wait_until([&] { return rt->stream(0) != nullptr; }));
         auto s0 = rt->stream(0);
         CHECK(s0 != nullptr);
         // Hold stream 0 the way a frame does, from outside the pool.
         std::unique_lock<std::mutex> held(s0->holder_mu);
+        size_t frames0_before = cap.frames(0);
         size_t frames1_before = cap.frames(1);
         CHECK(wait_until([&] { return cap.frames(1) > frames1_before + 5; }, 3000));
-        CHECK(cap.frames(0) == 0);  // stream 0 really is held
+        CHECK(cap.frames(0) == frames0_before);  // stream 0 really is held
         held.unlock();
         rt->stop();
         w.stop();
@@ -833,6 +837,7 @@ int main(int argc, char** argv) {
         std::string err;
         CHECK(rt->start(err));
         rt->handle_line(add_line(2, "synthetic://?w=64&h=48&fps=30", Json::array()));
+        CHECK(wait_until([&] { return rt->stream(2) != nullptr; }));
         auto s = rt->stream(2);
         CHECK(s != nullptr);
         CHECK(wait_until([&] { return busy(s); }, 4000));
@@ -996,6 +1001,14 @@ int main(int argc, char** argv) {
             m.record_frame(10.0f, 0.0f, now - 5000.0 + i * 10.0);
         Json j = m.to_json(0);
         CHECK_NEAR(j.at("fps").get<double>(), 0.0, 1e-9);
+        // A single frame anywhere in the active one-second window counts as
+        // one frame per second, regardless of the query phase.
+        for (double age_ms : {100.0, 500.0, 900.0}) {
+            StreamMetrics phase;
+            phase.record_frame(10.0f, 0.0f, now - age_ms);
+            Json phase_json = phase.to_json(0);
+            CHECK_NEAR(phase_json.at("fps").get<double>(), 1.0, 1e-9);
+        }
         // A live stream still reports a rate.
         StreamMetrics m2;
         for (int i = 0; i < 30; ++i)
@@ -1003,10 +1016,38 @@ int main(int argc, char** argv) {
         Json j2 = m2.to_json(0);
         CHECK(j2.at("fps").get<double>() > 10.0);
         CHECK(j2.at("fps").get<double>() < 60.0);
+        CHECK(j2.at("processed_frames").get<uint64_t>() == 30);
+        CHECK(j2.at("inference_ms_p50").get<double>() == 10.0);
         std::printf("stats fps window: OK (%.2f)\n", j2.at("fps").get<double>());
     }
 
-    // ---- 12) B4: a start failure after the writer is running exits cleanly --
+    // ---- 12) stats JSON carries process context/time observability ---------
+    {
+        Writer w;
+        Capture cap;
+        cap.install(w);
+        auto rt = make_runtime(w, Json{{"contexts_per_worker", 999}});
+        std::string err;
+        CHECK(rt->start(err));
+        rt->emit_stats();
+        CHECK(wait_until([&] { return !cap.control("stats").empty(); }));
+        auto records = cap.control("stats");
+        CHECK(!records.empty());
+        const Json& stats = records.back();
+        CHECK(stats.at("effective_contexts").is_number_unsigned());
+        CHECK(stats.at("effective_contexts").get<size_t>() == rt->config().contexts);
+        CHECK(stats.at("effective_contexts").get<size_t>() ==
+              static_cast<size_t>(rt->backend().caps().max_contexts));
+        CHECK(stats.at("stats_monotonic_ms").is_number_integer());
+        CHECK(stats.at("stats_wall_ms").is_number_integer());
+        CHECK(stats.at("stats_pid").get<int>() > 0);
+        rt->stop();
+        w.stop();
+        std::printf("stats context/time JSON: OK (%zu contexts)\n",
+                    stats.at("effective_contexts").get<size_t>());
+    }
+
+    // ---- 13) B4: a start failure after the writer is running exits cleanly --
     {
         // vb-runtime lives next to this test binary in the build tree. The
         // failure is triggered by a configured plugin that cannot be loaded,

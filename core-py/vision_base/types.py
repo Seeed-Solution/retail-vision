@@ -96,3 +96,4 @@ class Hello:
     model_sha256: str
     attr_names: tuple[str, ...]
     pid: int
+    stage2_ready: bool = False

@@ -3,6 +3,8 @@
 #pragma once
 
 #include <vector>
+#include <string>
+#include "vb/decoder.h"
 
 #include "vb/types.h"
 
@@ -21,5 +23,10 @@ void nms(std::vector<Detection>& dets, std::vector<Keypoint>& kpts, float iou,
 // score = obj * max(cls) > `score`.
 void yolox_decode(const float* out, int n_anchors, int n_cls, int model_w,
                   int model_h, float score, std::vector<Detection>& dets);
+
+enum class CtcLayout : uint8_t { CT = 0, TC = 1 };
+std::string ctc_greedy(const TensorView& logits, CtcLayout layout,
+                       const std::vector<std::string>& charset,
+                       float* mean_conf, float* min_char_conf);
 
 }  // namespace vb

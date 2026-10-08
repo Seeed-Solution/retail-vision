@@ -16,6 +16,8 @@
 
 namespace vb {
 
+enum class GridCenterActivation : uint8_t { Sigmoid = 0, None = 1 };
+
 // Parsed decoder parameters (§6.11 table).
 struct DecodeSpec {
     std::string type;
@@ -25,6 +27,9 @@ struct DecodeSpec {
     int keypoints = 17;
     int top_k = 1;
     bool softmax = true;
+    // Raw YOLOX grid-head center values are either logits (legacy RK model
+    // zoo convention) or already decoded offsets (standard YOLOX export).
+    GridCenterActivation grid_center_activation = GridCenterActivation::Sigmoid;
 };
 
 // One model output tensor with the batch dimension already removed,
@@ -34,6 +39,10 @@ struct TensorView {
     size_t count = 0;
     std::vector<int64_t> dims;  // batch removed, e.g. [4+nc, N]
     std::string name;
+    const void* raw_data = nullptr;
+    int32_t dtype = 0; // 0=f32, 1=i8, 2=u8, 3=f16
+    float scale = 1.0f;
+    int32_t zero_point = 0;
 };
 
 class Decoder {

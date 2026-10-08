@@ -1,0 +1,25 @@
+{
+  "layout": "CT",
+  "dims": [
+    2,
+    2
+  ],
+  "charset": [
+    "",
+    "A"
+  ],
+  "dtype": "u8",
+  "scale": 1.0,
+  "zero_point": 128,
+  "data": [
+    255,
+    255,
+    127,
+    127
+  ],
+  "expect": {
+    "text": "",
+    "mean": 0.0,
+    "min": 0.0
+  }
+}

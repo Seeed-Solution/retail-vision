@@ -1,0 +1,14 @@
+{
+  "analyzer":"slot_coverage",
+  "config":{"occupied_ratio":0.5,"free_ratio":0.1,"hold_s":0.0,"slots":[
+    {"id":"triangle","polygon":[[0.05,0.05],[0.45,0.05],[0.05,0.45]]},
+    {"id":"pentagon","polygon":[[0.55,0.15],[0.7,0.05],[0.9,0.15],[0.85,0.4],[0.6,0.4]]},
+    {"id":"collinear","polygon":[[0.05,0.6],[0.25,0.6],[0.45,0.6],[0.45,0.95],[0.05,0.95]]}
+  ]},
+  "frames":[{"seq":1,"t":0.0,"tracks":[]}],
+  "expect_events":[
+    {"seq":1,"type":"slot_change","track_id":0,"fields":{"slot_id":"triangle","prev_state":"unknown","state":"free","coverage":0.0}},
+    {"seq":1,"type":"slot_change","track_id":0,"fields":{"slot_id":"pentagon","prev_state":"unknown","state":"free","coverage":0.0}},
+    {"seq":1,"type":"slot_change","track_id":0,"fields":{"slot_id":"collinear","prev_state":"unknown","state":"free","coverage":0.0}}
+  ]
+}

@@ -4,8 +4,10 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 #include <fcntl.h>
@@ -137,8 +139,11 @@ bool MqttLite::start(std::string& err) {
 }
 
 void MqttLite::stop() {
+    std::lock_guard<std::mutex> stop_lk(stop_mu_);
     if (!running_.exchange(false)) {
         if (thread_.joinable()) thread_.join();
+        fail_queued();
+        fail_inflight();
         return;
     }
     // The worker drains its queue and publishes the final offline status first;
@@ -150,29 +155,83 @@ void MqttLite::stop() {
     if (!shutdown_done_.load(std::memory_order_acquire)) wake_io();
     if (thread_.joinable()) thread_.join();
     close_socket();
+    fail_queued();
+    fail_inflight();
 }
 
 void MqttLite::publish(const std::string& topic_suffix, const std::string& payload,
                        int qos, bool retain) {
-    std::lock_guard<std::mutex> lk(mu_);
-    evict_oldest_locked();  // bounded queue: full -> drop oldest, counted
-    q_.push_back(Msg{cfg_.topic_root + "/" + topic_suffix, payload, qos, retain, false});
+    DeliveryCallback dropped;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        dropped = evict_oldest_locked();  // bounded queue: full -> drop oldest, counted
+        q_.push_back(Msg{cfg_.topic_root + "/" + topic_suffix, payload, qos, retain, false, {}, 0});
+    }
+    if (dropped) notify(std::move(dropped), false);
+}
+
+uint64_t MqttLite::publish_confirmed(const std::string& topic_suffix,
+                                     const std::string& payload, bool retain,
+                                     DeliveryCallback callback) {
+    if (!callback) throw std::invalid_argument("mqtt: confirmed publish requires callback");
+    uint64_t token;
+    DeliveryCallback dropped;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        token = next_token_++;
+        dropped = evict_oldest_locked();
+        q_.push_back(Msg{cfg_.topic_root + "/" + topic_suffix, payload, 1, retain,
+                          false, std::move(callback), token});
+    }
+    if (dropped) notify(std::move(dropped), false);
+    return token;
 }
 
 // Caller holds mu_.
-void MqttLite::evict_oldest_locked() {
-    if (q_.size() < kQueueLimit) return;
+MqttLite::DeliveryCallback MqttLite::evict_oldest_locked() {
+    if (q_.size() < kQueueLimit) return {};
+    DeliveryCallback callback = std::move(q_.front().callback);
     q_.pop_front();
     dropped_.fetch_add(1, std::memory_order_relaxed);
+    return callback;
 }
 
 void MqttLite::push_front_bounded(const Msg& m) {
-    std::lock_guard<std::mutex> lk(mu_);
-    // A QoS1 requeue goes to the head, but it must honour the same 1024-record
-    // cap as publish(): pushing unconditionally let the queue grow past the
-    // limit (measured 1040) and stay there.
-    evict_oldest_locked();
-    q_.push_front(m);
+    DeliveryCallback dropped;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        // A QoS1 requeue goes to the head, but it must honour the same 1024-record
+        // cap as publish(): pushing unconditionally let the queue grow past the
+        // limit (measured 1040) and stay there.
+        dropped = evict_oldest_locked();
+        q_.push_front(m);
+    }
+    if (dropped) notify(std::move(dropped), false);
+}
+
+void MqttLite::notify(DeliveryCallback callback, bool confirmed) {
+    if (!callback) return;
+    try { callback(confirmed); } catch (...) {
+        std::fprintf(stderr, "mqtt: delivery callback threw\n");
+    }
+}
+
+void MqttLite::fail_queued() {
+    std::vector<DeliveryCallback> callbacks;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (auto& m : q_) if (m.callback) callbacks.push_back(std::move(m.callback));
+        q_.clear();
+    }
+    for (auto& callback : callbacks) notify(std::move(callback), false);
+}
+
+void MqttLite::fail_inflight() {
+    std::vector<DeliveryCallback> callbacks;
+    for (auto& item : inflight_) if (item.second.first.callback)
+        callbacks.push_back(std::move(item.second.first.callback));
+    inflight_.clear();
+    for (auto& callback : callbacks) notify(std::move(callback), false);
 }
 
 // ---- socket / TLS ----
@@ -545,7 +604,9 @@ bool MqttLite::take_and_publish(double) {
         m = std::move(q_.front());
         q_.pop_front();
     }
-    return publish_now(m);
+    if (publish_now(m)) return true;
+    notify(std::move(m.callback), false);
+    return false;
 }
 
 bool MqttLite::drain_and_read(double now) {
@@ -572,7 +633,12 @@ bool MqttLite::drain_and_read(double now) {
         if (type == 4 && body.size() >= 2) {  // PUBACK
             uint16_t pid =
                 static_cast<uint16_t>((uint8_t(body[0]) << 8) | uint8_t(body[1]));
-            inflight_.erase(pid);
+            auto it = inflight_.find(pid);
+            if (it != inflight_.end()) {
+                DeliveryCallback callback = std::move(it->second.first.callback);
+                inflight_.erase(it);
+                notify(std::move(callback), true);
+            }
         }
         // PINGRESP (13) and any other packet type need no action.
     }
@@ -618,8 +684,12 @@ void MqttLite::run() {
         // once after the reconnect (§6.10.3). Reversed insertion keeps them in
         // pid order at the head, and each one passes the 1024-record cap.
         std::vector<Msg> requeue;
+        std::vector<DeliveryCallback> exhausted;
         for (auto& kv : inflight_) {
-            if (kv.second.first.retried) continue;
+            if (kv.second.first.retried) {
+                exhausted.push_back(std::move(kv.second.first.callback));
+                continue;
+            }
             Msg m = kv.second.first;
             m.retried = true;
             requeue.push_back(m);
@@ -627,6 +697,7 @@ void MqttLite::run() {
         for (auto it = requeue.rbegin(); it != requeue.rend(); ++it)
             push_front_bounded(*it);
         inflight_.clear();
+        for (auto& callback : exhausted) notify(std::move(callback), false);
         close_socket();
         // Backoff 1,2,4,...<=max, +-20% jitter.
         double base = backoff_s_ == 0 ? cfg_.reconnect_min_s

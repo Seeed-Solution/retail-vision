@@ -47,6 +47,8 @@ public:
     // Minimum Caps.keypoints the model must provide (pose_angle, M1.17);
     // runtime add() rejects the analyzer when caps.keypoints < min_keypoints().
     virtual uint32_t min_keypoints() const { return 0; }
+    virtual void set_stage2_available(bool) {}
+    virtual uint64_t text_vote_dedup_count() const { return 0; }
     // Runtime re-configure; on failure the old config and state are kept.
     virtual bool configure(const std::string& json, std::string& err) = 0;
     virtual void on_frame(const FrameMeta& m, const std::vector<Track>& tracks,

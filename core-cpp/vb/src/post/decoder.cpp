@@ -109,8 +109,16 @@ private:
                 for (int gx = 0; gx < gw; ++gx) {
                     const float* p = src + static_cast<size_t>(start) * row;
                     float* q = dst + static_cast<size_t>(start) * row;
-                    const float cx = (sigmoid(p[0]) + gx) * s;
-                    const float cy = (sigmoid(p[1]) + gy) * s;
+                    const float tx = spec_.grid_center_activation ==
+                                             GridCenterActivation::Sigmoid
+                                         ? sigmoid(p[0])
+                                         : p[0];
+                    const float ty = spec_.grid_center_activation ==
+                                             GridCenterActivation::Sigmoid
+                                         ? sigmoid(p[1])
+                                         : p[1];
+                    const float cx = (tx + gx) * s;
+                    const float cy = (ty + gy) * s;
                     const float bw = std::exp(p[2]) * s;
                     const float bh = std::exp(p[3]) * s;
                     q[0] = cx - bw / 2.0f;
@@ -183,6 +191,24 @@ bool parse_spec(const Json& j, DecodeSpec& s, std::string& err) {
             return false;
         }
         s.softmax = sm->get<bool>();
+    }
+    auto ga = j.find("grid_center_activation");
+    if (ga != j.end() && !ga->is_null()) {
+        if (s.type != "yolox") {
+            err = "decoder: grid_center_activation only applies to yolox";
+            return false;
+        }
+        if (!ga->is_string()) {
+            err = "decoder: grid_center_activation must be \"none\" or \"sigmoid\"";
+            return false;
+        }
+        const std::string mode = ga->get<std::string>();
+        if (mode == "none") s.grid_center_activation = GridCenterActivation::None;
+        else if (mode == "sigmoid") s.grid_center_activation = GridCenterActivation::Sigmoid;
+        else {
+            err = "decoder: grid_center_activation must be \"none\" or \"sigmoid\"";
+            return false;
+        }
     }
     return true;
 }

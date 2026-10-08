@@ -18,13 +18,25 @@
 # vendor symbol a build error instead of a runtime one.
 set(RKNN_LIB_DIR "/opt/rk" CACHE PATH "directory holding librknnrt.so")
 set(RGA_LIB_DIR "/opt/rk" CACHE PATH "directory holding librga.so")
+set(RKNN_API_INCLUDE_DIR "" CACHE PATH
+    "directory containing the proprietary rknn_api.h header")
 
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/rknn/rknn_api.h")
+if(RKNN_API_INCLUDE_DIR)
+    if(NOT EXISTS "${RKNN_API_INCLUDE_DIR}/rknn_api.h")
+        message(FATAL_ERROR
+            "vb: RKNN_API_INCLUDE_DIR must contain rknn_api.h: "
+            "${RKNN_API_INCLUDE_DIR}")
+    endif()
+    set(_RKNN_API_INCLUDE_DIR "${RKNN_API_INCLUDE_DIR}")
+elseif(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/rknn/rknn_api.h")
     message(FATAL_ERROR
         "vb: rknn backend needs third_party/rknn/rknn_api.h. It is a "
         "proprietary Rockchip header and is deliberately not committed; fetch "
         "it with the URL and sha256 in "
         "backends/rknn/third_party/THIRD_PARTY.md.")
+else()
+    set(_RKNN_API_INCLUDE_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/rknn")
 endif()
 
 find_library(RKNN_LIBRARY NAMES rknnrt librknnrt.so
@@ -33,13 +45,15 @@ find_library(RGA_LIBRARY NAMES rga librga.so HINTS "${RGA_LIB_DIR}" REQUIRED)
 
 add_library(vb_rknn OBJECT
     hybrid_rga_rknn.cpp
+    rknn_stage2.cpp
     rknn_backend.cpp
     mpp_source.cpp
     model_sha256.cpp
     register.cpp)
 target_include_directories(vb_rknn PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    ${_RKNN_API_INCLUDE_DIR})
 # Only vb_core's usage requirements, not the library itself (same reason as the
 # cpu backend: an OBJECT library forwards its link deps to every consumer).
 target_include_directories(vb_rknn PRIVATE

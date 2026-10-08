@@ -15,6 +15,8 @@
 #include "vb/decoder.h"
 #include "vb/json.h"
 #include "vb/letterbox.h"
+#include "vb/text_match.h"
+#include "vb/post.h"
 
 namespace {
 
@@ -146,6 +148,22 @@ int run_analyzer(const std::string& name, const std::string& path, bool plugin,
     return 0;
 }
 
+int run_textmatch(const std::string& path) {
+    auto j=vb::json_parse(read_file(path)); std::vector<vb::TextPattern> p; std::string err;
+    if(!vb::parse_text_patterns(j.at("patterns"),p,err)){std::fprintf(stderr,"textmatch: %s\n",err.c_str());return 1;}
+    for(const auto& c:j.at("cases")) if(vb::text_matches(c.at("text").get<std::string>(),p)!=c.at("expect").get<bool>()){std::fprintf(stderr,"textmatch mismatch: %s\n",c.at("text").get<std::string>().c_str());return 1;}
+    std::printf("textmatch %s: OK\n",path.c_str()); return 0;
+}
+
+int run_ctc(const std::string& path) {
+    auto j=vb::json_parse(read_file(path)); std::vector<int64_t> dims; for(const auto& x:j.at("dims")) dims.push_back(x.get<int64_t>());
+    const auto& a=j.at("data"); const std::string dtype=j.value("dtype", "f32"); vb::TensorView v; v.dims=dims; v.count=a.size(); v.dtype=dtype=="i8"?1:dtype=="u8"?2:dtype=="f16"?3:0; v.scale=j.value("scale",1.0f); v.zero_point=j.value("zero_point",0);
+    std::vector<float> f; std::vector<int8_t> i8; std::vector<uint8_t> u8; std::vector<uint16_t> h;
+    if(v.dtype==0){for(const auto& x:a)f.push_back(x.get<float>());v.data=f.data();} else if(v.dtype==1){for(const auto& x:a)i8.push_back(x.get<int>());v.raw_data=i8.data();} else if(v.dtype==2){for(const auto& x:a)u8.push_back(x.get<int>());v.raw_data=u8.data();} else {for(const auto& x:a)h.push_back(x.get<int>());v.raw_data=h.data();}
+    float mean=-1,minc=-1; auto layout=j.at("layout").get<std::string>()=="TC"?vb::CtcLayout::TC:vb::CtcLayout::CT; auto got=vb::ctc_greedy(v,layout,j.at("charset").get<std::vector<std::string>>(),&mean,&minc); const auto& e=j.at("expect");
+    if(got!=e.at("text").get<std::string>()||std::fabs(mean-e.at("mean").get<double>())>1e-6||std::fabs(minc-e.at("min").get<double>())>1e-6){std::fprintf(stderr,"ctc %s mismatch: text=%s mean=%g min=%g\n",path.c_str(),got.c_str(),mean,minc);return 1;} std::printf("ctc %s: OK\n",path.c_str()); return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -155,6 +173,8 @@ int main(int argc, char** argv) {
     if (argc >= 3 && std::strcmp(argv[1], "decode") == 0) {
         return run_decode(argv[2]);
     }
+    if (argc >= 3 && std::strcmp(argv[1], "textmatch") == 0) return run_textmatch(argv[2]);
+    if (argc >= 3 && std::strcmp(argv[1], "ctc") == 0) return run_ctc(argv[2]);
     if (argc >= 4 && std::strcmp(argv[1], "analyzer") == 0) {
         bool plugin = (argc >= 6 && std::strcmp(argv[4], "--plugin") == 0);
         return run_analyzer(argv[2], argv[3], plugin,
@@ -163,6 +183,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
                  "usage: vb_selftest letterbox <fixture.json>\n"
                  "       vb_selftest analyzer <name> <fixture.json> [--plugin <path.so>]\n"
-                 "       vb_selftest decode <fixture.json>\n");
+                 "       vb_selftest decode <fixture.json>\n"
+                 "       vb_selftest ctc <ctc_case.json>\n");
     return 2;
 }

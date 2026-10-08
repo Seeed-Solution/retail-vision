@@ -219,6 +219,19 @@
           ]
         }
       ]
+    },
+    {
+      "src": [1920, 1080],
+      "crop": [0.25, 0.5, 0.75, 1.0],
+      "model": [640, 640],
+      "align": "center",
+      "note": "Pure crop geometry: crop rectangle is 960x540 at (480,540); local fit scale=2/3, pad=(0,140), full-source geometry has negative correction pad=(-320,-220).",
+      "crop_px": [480, 540, 960, 540],
+      "geom": {"scale": 0.6666666667, "pad_x": -320, "pad_y": -220},
+      "points": [
+        {"model": [0.5, 0.5], "expect": [0.5, 0.75]},
+        {"model": [0.25, 0.25], "expect": [0.375, 0.625]}
+      ]
     }
   ]
 }

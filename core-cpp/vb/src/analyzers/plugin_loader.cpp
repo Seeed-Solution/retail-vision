@@ -18,6 +18,9 @@
 #include "pose_angle.h"
 #include "speed.h"
 #include "zone.h"
+#include "text_vote.h"
+
+namespace vb { std::unique_ptr<Analyzer> make_slot_coverage_analyzer(); }
 
 namespace vb {
 namespace {
@@ -222,6 +225,8 @@ std::unique_ptr<Analyzer> create_analyzer(const std::string& name, std::string& 
     if (name == "direction") return make_direction_analyzer();
     if (name == "count_threshold") return make_count_threshold_analyzer();
     if (name == "pose_angle") return make_pose_angle_analyzer();
+    if (name == "text_vote") return make_text_vote_analyzer();
+    if (name == "slot_coverage") return make_slot_coverage_analyzer();
     err = "unknown analyzer: " + name;
     return nullptr;
 }

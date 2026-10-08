@@ -7,7 +7,7 @@
 # Usage: sudo ./tools/verify_on_device.sh [seconds]
 set -u
 
-D=/home/harvest/project/retail-vision-hailo
+D=${WORK_DIR:?set WORK_DIR to the retail-vision checkout on the device}
 L=/tmp/rv-verify2
 SECS=${1:-60}
 # Second arg overrides the source, so the same window/restore procedure covers

@@ -8,6 +8,33 @@
   "properties": {
     "schema": { "const": "vb.config/1" },
     "device_id": { "type": "string", "minLength": 1 },
+    "stage2": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["model_path", "input_hw", "charset"],
+      "properties": {
+        "model_path": {"type": "string", "minLength": 1},
+        "input_hw": {"type": "array", "minItems": 2, "maxItems": 2,
+          "items": {"type": "integer", "minimum": 1, "maximum": 4096}},
+        "charset": {"type": "array", "minItems": 2, "items": [{"const": ""}],
+          "additionalItems": {"type": "string"}},
+        "color": {"enum": ["rgb", "bgr"]},
+        "ctc_layout": {"enum": ["ct", "tc"]},
+        "backend": {"enum": ["", "cpu"]},
+        "fallback_cpu": {"type": "boolean"},
+        "scale": {"type": "number", "exclusiveMinimum": 0},
+        "mean": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "number"}},
+        "expand": {"type": "number", "minimum": 0, "maximum": 0.5},
+        "min_gap_s": {"type": "number", "minimum": 0},
+        "min_score": {"type": "number", "minimum": 0, "maximum": 1},
+        "max_per_track": {"type": "integer", "minimum": 1, "maximum": 64},
+        "max_crops_per_frame": {"type": "integer", "minimum": 1, "maximum": 16},
+        "classes": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 2147483647}},
+        "roi": {"type": ["array", "null"], "minItems": 3, "maxItems": 16,
+          "items": {"type": "array", "minItems": 2, "maxItems": 2,
+            "items": {"type": "number", "minimum": 0, "maximum": 1}}}
+      }
+    },
     "backend": {
       "type": "object",
       "required": ["name", "model_path"],
@@ -46,6 +73,8 @@
             "reg_max": { "type": "integer", "minimum": 1, "default": 16 },
             "strides": { "type": "array", "items": { "type": "integer", "minimum": 1 },
                          "minItems": 1, "default": [8, 16, 32] },
+            "grid_center_activation": { "enum": ["none", "sigmoid"], "default": "sigmoid",
+                                         "description": "Raw YOLOX grid center activation; only applies when strides tile the output canvas." },
             "keypoints": { "type": "integer", "minimum": 0, "default": 17 },
             "top_k": { "type": "integer", "minimum": 1, "default": 1 },
             "softmax": { "type": "boolean", "default": true }
@@ -143,7 +172,8 @@
           "options": {
             "type": "object",
             "properties": {
-              "max_fps": { "type": "number", "minimum": 0, "default": 0 },
+              "max_fps": { "type": "number", "minimum": 0, "default": 0,
+                "description": "finite frames per second; 0 means unlimited" },
               "roi_crop": {
                 "default": null,
                 "oneOf": [

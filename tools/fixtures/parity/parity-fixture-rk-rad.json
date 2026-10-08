@@ -1,0 +1,43 @@
+{
+ "schema": "vb.config/1",
+ "runtime": {
+  "contexts_per_worker": 1,
+  "open_timeout_s": 120.0,
+  "reconnect_delay_s": 0.2
+ },
+ "tracker": {
+  "enabled": false
+ },
+ "analyzers": {
+  "plugins": []
+ },
+ "snapshot_ring": {
+  "frames": 0
+ },
+ "streams": [
+  {
+   "stream_id": "parity-fixture",
+   "url": "rtsp://<device-ip>:18664/vb-parity-fixture",
+   "transport": "tcp",
+   "score_threshold": 0.3,
+   "options": {
+    "codec": "h264"
+   }
+  }
+ ],
+ "description": "BASE-1 parity frame-alignment fixture, platform side (<rk3588-board> RK3588). Mirrors parity-rk-rad.json but points at the fixture mediamtx instance (port 18664, hosted on <dev-host>) and raises open_timeout_s to 120 so the consumer survives the fixture's reader-join window before the payload starts.",
+ "backend": {
+  "name": "rknn",
+  "model_path": "/models/yolox_tiny_bgr255.rk3588.rknn",
+  "model_sha256": "7cfb29ced3a916d6488ad21c44c1317f4c164f903ecef8769ec1d9c7056e21fa",
+  "decoder": {
+   "type": "yolox",
+   "num_classes": 80,
+   "strides": [
+    8,
+    16,
+    32
+   ]
+  }
+ }
+}

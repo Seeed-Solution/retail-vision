@@ -402,7 +402,8 @@ class RuntimeClient:
                 model_hw=tuple(obj.get("model_hw", (0, 0))),
                 model_sha256=obj.get("model_sha256", ""),
                 attr_names=tuple(obj.get("attr_names", ())),
-                pid=int(obj.get("pid", 0)))
+                pid=int(obj.get("pid", 0)),
+                stage2_ready=bool(obj.get("stage2_ready", False)))
             self._hello_event.set()
         elif op == "reply":
             req = obj.get("req")
