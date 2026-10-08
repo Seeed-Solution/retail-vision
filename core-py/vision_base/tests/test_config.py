@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sys
 
@@ -17,10 +18,100 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import jsonschema
 
 from vision_base.config import BaseConfig, ConfigError, load, runtime_config
+from vision_base.runtime_client import RuntimeClient, RuntimeGone
 
 FIXTURES = pathlib.Path(__file__).resolve().parents[3] / "contracts" / "fixtures" / "vb"
 SCHEMA_PATH = FIXTURES.parent.parent / "vb-config.schema.json"
 SCHEMA = json.loads(SCHEMA_PATH.read_text())
+
+
+def test_top_stage2_reaches_native_config_without_aliasing(tmp_path):
+    raw = json.loads((FIXTURES / "config_valid/full.json").read_text())
+    raw["stage2"] = {"model_path": "/models/rec.onnx", "input_hw": [32, 96],
+                     "charset": ["", "A", "B"], "backend": "cpu", "roi": None}
+    jsonschema.validate(raw, SCHEMA)
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw))
+    cfg = load(str(path))
+    native = runtime_config(cfg, 0)
+    assert native["stage2"] == raw["stage2"]
+    native["stage2"]["charset"].append("C")
+    assert cfg.stage2["charset"] == ["", "A", "B"]
+
+
+def test_top_stage2_rejects_unknown_field_in_python_and_schema(tmp_path):
+    raw = json.loads((FIXTURES / "config_valid/full.json").read_text())
+    raw["stage2"] = {"model_path": "/models/rec.onnx", "input_hw": [32, 96],
+                     "charset": ["", "A"], "unexpected": 1}
+    with pytest.raises(jsonschema.ValidationError, match="additionalProperties"):
+        jsonschema.validate(raw, SCHEMA)
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ConfigError, match=r"stage2\.unexpected: unknown stage2 key"):
+        load(str(path))
+
+
+def test_native_stage2_rejects_unknown_field_at_startup(tmp_path):
+    binary = os.environ.get("VB_STAGE2_RUNTIME_BIN")
+    if not binary:
+        pytest.skip("VB_STAGE2_RUNTIME_BIN must select a native runtime build")
+    path = tmp_path / "native-config.json"
+    path.write_text(json.dumps({
+        "backend": {"name": "synthetic"},
+        "stage2": {"model_path": "/does/not/exist.onnx", "input_hw": [2, 2],
+                   "charset": ["", "A"], "unexpected": 1},
+    }))
+    client = RuntimeClient(
+        [binary, "--ipc-fd", "{fd}"], str(path),
+        on_frame=lambda *args: None, on_event=lambda *args: None,
+        on_stats=lambda *args: None, on_state=lambda *args: None,
+        on_exit=lambda *args: None,
+    )
+    try:
+        with pytest.raises(RuntimeGone):
+            client.start()
+        assert client.proc is not None and client.proc.poll() is not None
+    finally:
+        client.stop()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("input_hw", [True, 96]), ("input_hw", [32, 2**64-1]),
+    ("charset", ["<blank>", "A"]), ("color", "gray"), ("backend", "auto"),
+    ("fallback_cpu", 1), ("roi", [0, 0, 1, 1]), ("classes", [2**64-1]),
+    ("scale", float("nan")), ("mean", [0, float("inf"), 0]),
+    ("min_gap_s", -1), ("max_per_track", 65), ("max_crops_per_frame", 17),
+])
+def test_top_stage2_rejects_invalid_fields(tmp_path, field, value):
+    raw = json.loads((FIXTURES / "config_valid/full.json").read_text())
+    raw["stage2"] = {"model_path": "/models/rec.onnx", "input_hw": [32, 96],
+                     "charset": ["", "A"], field: value}
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ConfigError, match="stage2"):
+        load(str(path))
+
+
+@pytest.mark.parametrize("value", [True, float("nan"), float("inf"), -1.0])
+def test_stream_max_fps_requires_finite_nonnegative_number(tmp_path, value):
+    raw = json.loads((FIXTURES / "config_valid/full.json").read_text())
+    raw["streams"] = [{"stream_id": "cam", "url": "synthetic://0",
+                        "options": {"max_fps": value}}]
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw, allow_nan=True))
+    with pytest.raises(ConfigError, match=r"streams\[0\]\.options\.max_fps"):
+        load(str(path))
+
+
+@pytest.mark.parametrize("options", [None, [], "bad", 1])
+def test_stream_options_must_be_object(tmp_path, options):
+    raw = json.loads((FIXTURES / "config_valid/full.json").read_text())
+    raw["streams"] = [{"stream_id": "cam", "url": "synthetic://0",
+                        "options": options}]
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ConfigError, match=r"streams\[0\]\.options"):
+        load(str(path))
 
 # expected field path per invalid fixture (message must contain it)
 INVALID_EXPECTED_PATH = {
@@ -73,10 +164,22 @@ def test_runtime_config_has_no_streams():
     assert rt["tracker"] == cfg.tracker
     assert rt["analyzers"] == {"plugins": []}
     assert rt["snapshot_ring"] == 2
+    assert rt["open_timeout_s"] == 8.0
     rt1 = runtime_config(cfg, 1)
     assert "streams" not in rt1
     with pytest.raises(ConfigError):
         runtime_config(cfg, -1)
+
+
+def test_runtime_config_uses_custom_open_timeout(tmp_path):
+    raw = json.loads((FIXTURES / "config_valid" / "full.json").read_text())
+    raw["runtime"]["open_timeout_s"] = 12.0
+    path = tmp_path / "custom-timeout.json"
+    path.write_text(json.dumps(raw))
+    cfg = load(str(path))
+    rt = runtime_config(cfg, 0)
+    assert rt["open_timeout_s"] == 12.0
+    assert "streams" not in rt
 
 
 def test_decoder_config_validation():

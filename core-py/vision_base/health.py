@@ -37,6 +37,7 @@ def build_healthz(*, device_id: str, backend: str, uptime_s: float,
     queue_depth: list[int] = []
     dropped: list[int] = []
     app_parts: list[dict] = []
+    app_error_parts: list[dict] = []
     for sh in shards:
         if sh.get("rss_kb") is not None:
             rss_total += sh["rss_kb"]
@@ -49,6 +50,8 @@ def build_healthz(*, device_id: str, backend: str, uptime_s: float,
         dropped.append(int(mqtt.get("dropped", 0)))
         if isinstance(sh.get("app"), dict):
             app_parts.append(sh["app"])
+        if isinstance(sh.get("app_error"), dict):
+            app_error_parts.append(sh["app_error"])
     if sup["rss_kb"] is not None:
         rss_total += sup["rss_kb"]
 
@@ -75,11 +78,16 @@ def build_healthz(*, device_id: str, backend: str, uptime_s: float,
                 "rss_kb": rt.get("rss_kb"), "cpu_s": rt.get("cpu_s"),
                 "version": rt.get("version", ""),
                 "backend": rt.get("backend", ""),
+                **({key: rt[key] for key in
+                    ("effective_contexts", "stats_monotonic_ms",
+                     "stats_wall_ms", "stats_pid") if key in rt}),
                 # §6.9 rule 2: the shard gave up restarting its vb-runtime.
                 # The Python shard is still alive, so without this the report
                 # says "ok" while no stream can run (review item 16).
                 "failed": bool(rt.get("failed"))},
             **({"app": sh["app"]} if isinstance(sh.get("app"), dict) else {}),
+            **({"app_error": sh["app_error"]}
+               if isinstance(sh.get("app_error"), dict) else {}),
             **({"hook_budget": sh["hook_budget"]}
                if isinstance(sh.get("hook_budget"), dict) else {}),
         } for sh in shards for rt in [sh.get("runtime") or {}]],
@@ -89,12 +97,15 @@ def build_healthz(*, device_id: str, backend: str, uptime_s: float,
     merged = _merge_app(app_parts)
     if merged is not None:
         body["app"] = merged
+    merged_app_error = _merge_app(app_error_parts)
+    if merged_app_error is not None:
+        body["app_error"] = merged_app_error
 
     runtime_failed = any((sh.get("runtime") or {}).get("failed")
                          for sh in shards)
     healthy = bool(shards) and all(sh["alive"] for sh in shards) \
         and all(publish_connected) and control_connected \
-        and not runtime_failed
+        and not runtime_failed and not app_error_parts
     if not healthy:
         body["status"] = "degraded"
     return body

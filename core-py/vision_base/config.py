@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -15,11 +16,16 @@ SCHEMA_ID = "vb.config/1"
 STREAM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 DECODER_TYPES = {"yolox", "yolov8", "yolov8_dfl", "yolo_pose", "classify", "raw"}
 DECODER_KEYS = {"type", "num_classes", "reg_max", "strides", "keypoints",
-                "top_k", "softmax"}
+                "top_k", "softmax", "grid_center_activation"}
+STAGE2_KEYS = {
+    "model_path", "input_hw", "charset", "color", "ctc_layout", "backend",
+    "fallback_cpu", "scale", "mean", "expand", "min_gap_s", "min_score",
+    "max_per_track", "max_crops_per_frame", "classes", "roi",
+}
 TOP_LEVEL_KEYS = {
     "schema", "device_id", "backend", "runtime", "native", "state_dir",
     "tracker", "analyzers", "mqtt", "health", "streams_file", "streams", "app",
-    "dev",
+    "dev", "stage2",
 }
 
 DEFAULTS: dict = {
@@ -70,6 +76,7 @@ class BaseConfig:
     app: dict
     dev: dict = field(default_factory=dict)
     source_path: str = ""
+    stage2: dict | None = None
 
 
 def _err(path: str, msg: str) -> None:
@@ -158,6 +165,8 @@ def _check_options(options: dict, path: str) -> None:
         _err(path, "must be an object")
     if "max_fps" in options:
         _check_num(options["max_fps"], f"{path}.max_fps", lo=0.0)
+        if not math.isfinite(float(options["max_fps"])):
+            _err(f"{path}.max_fps", "must be finite")
     if "roi_crop" in options:
         roi = options["roi_crop"]
         if roi is not None:
@@ -166,6 +175,8 @@ def _check_options(options: dict, path: str) -> None:
                            for v in roi)):
                 _err(f"{path}.roi_crop", "must be null or [x0, y0, x1, y1] numbers")
             x0, y0, x1, y1 = roi
+            if any(not math.isfinite(float(v)) for v in roi):
+                _err(f"{path}.roi_crop", "coordinates must be finite")
             if not (0 <= x0 < x1 <= 1) or not (0 <= y0 < y1 <= 1):
                 _err(f"{path}.roi_crop", "requires 0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1")
             if x1 - x0 < 0.05 or y1 - y0 < 0.05:
@@ -288,6 +299,76 @@ def _validate(data: dict, *, partial: bool = False, allow_dev: bool = False) -> 
         _err("schema", f"must be {SCHEMA_ID!r}")
     _require(data, "device_id", "device_id")
     _check_str(data.get("device_id"), "device_id")
+    stage2 = data.get("stage2")
+    if stage2 is not None:
+        if not isinstance(stage2, dict):
+            _err("stage2", "must be an object or null")
+        for key in stage2:
+            if key not in STAGE2_KEYS:
+                _err(f"stage2.{key}", "unknown stage2 key")
+        _require(stage2, "model_path", "stage2.model_path")
+        _check_str(stage2["model_path"], "stage2.model_path")
+        hw = stage2.get("input_hw")
+        if not isinstance(hw, list) or len(hw) != 2:
+            _err("stage2.input_hw", "must be [h,w]")
+        for n in hw:
+            _check_int(n, "stage2.input_hw", minimum=1)
+            if n > 4096:
+                _err("stage2.input_hw", "must be <= 4096")
+        charset = stage2.get("charset")
+        if (not isinstance(charset, list) or len(charset) < 2 or charset[0] != ""
+                or any(not isinstance(c, str) for c in charset)):
+            _err("stage2.charset", "requires strings with empty blank at index 0")
+        for key, values in (("color", {"rgb", "bgr"}), ("ctc_layout", {"ct", "tc"}), ("backend", {"", "cpu"})):
+            if key in stage2 and (not isinstance(stage2[key], str) or stage2[key] not in values):
+                _err(f"stage2.{key}", f"must be one of {sorted(values)}")
+        if "fallback_cpu" in stage2 and not isinstance(stage2["fallback_cpu"], bool):
+            _err("stage2.fallback_cpu", "must be boolean")
+        def finite_number(n, key, lo=None):
+            _check_num(n, key, lo=lo)
+            try:
+                finite = math.isfinite(float(n))
+            except OverflowError:
+                finite = False
+            if not finite:
+                _err(key, "must be finite")
+        for key, lo, hi in (("scale", 0, None), ("expand", 0, .5),
+                            ("min_gap_s", 0, None), ("min_score", 0, 1)):
+            if key in stage2:
+                finite_number(stage2[key], f"stage2.{key}", lo=lo)
+                if key == "scale" and stage2[key] == 0:
+                    _err("stage2.scale", "must be positive")
+                if hi is not None and stage2[key] > hi:
+                    _err(f"stage2.{key}", f"must be <= {hi}")
+        for key, hi in (("max_per_track", 64), ("max_crops_per_frame", 16)):
+            if key in stage2:
+                _check_int(stage2[key], f"stage2.{key}", minimum=1)
+                if stage2[key] > hi:
+                    _err(f"stage2.{key}", f"must be <= {hi}")
+        if "mean" in stage2:
+            mean = stage2["mean"]
+            if not isinstance(mean, list) or len(mean) != 3:
+                _err("stage2.mean", "must have 3 numbers")
+            for n in mean:
+                finite_number(n, "stage2.mean")
+        if "classes" in stage2:
+            if not isinstance(stage2["classes"], list):
+                _err("stage2.classes", "must be an array")
+            for n in stage2["classes"]:
+                _check_int(n, "stage2.classes", minimum=0)
+                if n > 2147483647:
+                    _err("stage2.classes", "must fit int32")
+        if stage2.get("roi") is not None:
+            roi = stage2["roi"]
+            if not isinstance(roi, list) or not 3 <= len(roi) <= 16:
+                _err("stage2.roi", "requires 3..16 points")
+            for p in roi:
+                if not isinstance(p, list) or len(p) != 2:
+                    _err("stage2.roi", "point must contain x,y")
+                for n in p:
+                    finite_number(n, "stage2.roi", lo=0)
+                    if n > 1:
+                        _err("stage2.roi", "coordinates must be <= 1")
 
     # backend
     _require(data, "backend", "backend")
@@ -459,6 +540,7 @@ def load(path: str, *, partial: bool = False, allow_dev: bool = False) -> BaseCo
         mqtt=merged["mqtt"], health=merged["health"],
         streams_file=merged["streams_file"], streams=merged["streams"],
         app=merged["app"], dev=merged["dev"], source_path=str(path),
+        stage2=copy.deepcopy(merged.get("stage2")),
     )
 
 
@@ -474,9 +556,12 @@ def runtime_config(cfg: BaseConfig, shard_index: int) -> dict:
         "tracker": copy.deepcopy(cfg.tracker),
         "analyzers": {"plugins": list(cfg.analyzers.get("plugins", []))},
         "snapshot_ring": cfg.native.get("snapshot_ring", 2),
+        "open_timeout_s": cfg.runtime["open_timeout_s"],
     }
     if cfg.dev.get("raw_tensors"):
         # §6.12: the native child reads dev limits (max_fps / max_streams)
         # from this file; include `dev` only in dev mode.
         out["dev"] = copy.deepcopy(cfg.dev)
+    if cfg.stage2 is not None:
+        out["stage2"] = copy.deepcopy(cfg.stage2)
     return out
