@@ -24,6 +24,9 @@
 #include "vb/tracker.h"
 #include "vb/vb_analyzer_abi.h"
 #include "vb/wire.h"
+#include "vb/post.h"
+#include "vb/rate_crop.h"
+#include "stage2.h"
 
 namespace vb {
 
@@ -114,6 +117,9 @@ public:
     void record_frame(float inference_ms, float queue_delay_ms, double wall_ms);
     void add_dropped(uint64_t n);
     void add_rate_skipped(uint64_t n);
+    void add_text_vote_dedup(uint64_t n);
+    void set_stage2_backend(const std::string& backend, bool fallback);
+    void record_stage2(float ms, bool failed);
 
     std::string state() const;
     // One entry of the stats op "streams" array (mutex-guarded snapshot).
@@ -125,8 +131,12 @@ public:
 private:
     mutable std::mutex mu_;
     std::string state_ = "starting", error_, decode_;
-    uint64_t processed_ = 0, dropped_ = 0, rate_skipped_ = 0;
+    uint64_t processed_ = 0, dropped_ = 0, rate_skipped_ = 0, text_vote_dedup_ = 0;
     std::deque<float> inf_ms_, qd_ms_;
+    std::string stage2_backend_;
+    bool fallback_active_ = false;
+    uint64_t stage2_errors_ = 0;
+    std::deque<float> stage2_ms_;
     // Frame wall-clock stamps of the last second. Pruned against the current
     // time by to_json() as well as by record_frame(): a stream that stopped
     // producing frames must not keep reporting its last FPS (the window has to
@@ -139,6 +149,7 @@ private:
 struct RuntimeConfig {
     std::string backend_name = "synthetic";
     std::string backend_json = "{}";
+    std::string stage2_json;
     int contexts = 1;
     double open_timeout_s = 5.0;
     double reconnect_delay_s = 1.0;
@@ -224,7 +235,15 @@ struct StreamState {
     bool track_enabled = true;
     std::vector<std::unique_ptr<Analyzer>> analyzers;
     std::vector<std::string> analyzer_names;
+    std::unique_ptr<Stage2Context> stage2;
+    Stage2Spec stage2_spec;
+    std::string stage2_backend, stage2_fallback_reason;
+    std::vector<std::string> stage2_charset;
+    CtcLayout stage2_layout = CtcLayout::CT;
+    Stage2FilterConfig stage2_filter;
+    std::map<uint32_t, Stage2TrackState> stage2_tracks;
     StreamMetrics metrics;
+    RateLimiter rate_limiter;
 
     // Holder exclusion (busy set) + remove handshake.
     std::mutex holder_mu;
@@ -253,6 +272,13 @@ struct StreamState {
 
     // Dev-mode VBT1 rate limiter (§6.12 dev.max_fps).
     DevRateLimiter dev_limiter;
+};
+
+struct AddRequest {
+    std::string req;
+    StreamSpec spec;
+    Json analyzers;
+    std::atomic<bool> cancelled{false};
 };
 
 class Runtime {
@@ -300,6 +326,7 @@ private:
     void op_set_threshold(const Json& line);
     void op_configure_analyzer(const Json& line);
     void op_snapshot(const Json& line);
+    void op_infer_image(const Json& line);
     void op_stop(const Json& line);
     void reply(const std::string& req, bool ok, const Json& applied,
                const std::string& error);
@@ -309,7 +336,9 @@ private:
                            const std::string& error);
     std::shared_ptr<StreamState> add_stream_locked(const StreamSpec& spec,
                                                    const Json& analyzers,
+                                                   const std::shared_ptr<AddRequest>& request,
                                                    std::string& err);
+    void add_worker();
     // C2: resolves a control-plane analyzer name to an analyzer. Accepts only
     // built-in names and "plugin:<id>" ids registered from analyzers.plugins;
     // a name that carries a path is rejected, never dlopen'd.
@@ -323,8 +352,11 @@ private:
     void maybe_send_dev_tensors(StreamState& s, const FrameBuf& f,
                                 const DetectionResult& res, InferenceContext* ctx);
     void source_thread(std::shared_ptr<StreamState> s,
-                       std::unique_ptr<FrameSource> src);
+                       std::unique_ptr<FrameSource> src,
+                       std::optional<FrameBuf> first = std::nullopt);
     void stats_thread();
+    void image_thread();
+    bool configure_stage2(StreamState& s, const Json& config, std::string& err, bool stream = true);
 
     std::unique_ptr<Backend> backend_;
     RuntimeConfig cfg_;
@@ -334,10 +366,25 @@ private:
 
     std::mutex streams_mu_;  // guards streams_ and all user-facing add/remove
     std::map<uint32_t, std::shared_ptr<StreamState>> streams_;
+    std::map<uint32_t, std::shared_ptr<AddRequest>> opening_;
+    std::mutex add_mu_;
+    std::condition_variable add_cv_;
+    std::deque<std::shared_ptr<AddRequest>> add_queue_;
+    std::thread add_thread_;
+    bool add_stopping_ = false;
+    size_t add_inflight_ = 0;
     std::vector<std::unique_ptr<InferenceContext>> contexts_;
     std::vector<std::pair<uint32_t, std::thread>> source_threads_;
     std::unique_ptr<ContextPool> pool_;
     std::thread stats_thread_;
+    std::thread image_thread_;
+    std::mutex image_mu_;
+    std::condition_variable image_cv_;
+    std::deque<Json> image_queue_;
+    static constexpr size_t kImageQueueLimit = 16;
+    bool image_stopping_ = false;
+    std::unique_ptr<StreamState> image_stage2_;
+    std::atomic<bool> image_ready_{false};
     std::atomic<bool> stopping_{false};
     std::atomic<bool> stop_requested_{false};
     // Plugin whitelist: built once from the protected config, read-only after.

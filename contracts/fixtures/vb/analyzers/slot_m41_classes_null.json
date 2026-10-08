@@ -1,0 +1,1 @@
+{"analyzer":"slot_coverage","config":{"slots":[{"id":"x","polygon":[[0,0],[1,0],[1,1],[0,1]]}],"classes":null},"expect_configure_error":"classes must be an array of ints"}

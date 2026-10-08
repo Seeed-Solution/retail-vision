@@ -153,6 +153,46 @@ int main(int argc, char** argv) {
         CHECK(err.find("keypoints") != std::string::npos);
     }
 
+    // Explicit raw-grid center activation: the default preserves the RK
+    // model-zoo sigmoid contract, while standard YOLOX exports can declare
+    // already-decoded center offsets. Exercise both row and transposed
+    // layouts over two stride levels (4 + 1 anchors on a 16x16 canvas).
+    {
+        const int anchors = 5, ch = 6;
+        std::vector<float> rows(static_cast<size_t>(anchors * ch), 0.0f);
+        rows[0] = -2.0f;  // raw x center: sigmoid vs none are far apart
+        rows[1] = 0.0f;
+        rows[2] = rows[3] = 0.0f;
+        rows[4] = rows[5] = 0.9f;
+        TensorView row_view{rows.data(), rows.size(), {anchors, ch}, ""};
+        std::vector<float> transposed(static_cast<size_t>(anchors * ch), 0.0f);
+        for (int a = 0; a < anchors; ++a)
+            for (int c = 0; c < ch; ++c)
+                transposed[static_cast<size_t>(c * anchors + a)] = rows[a * ch + c];
+        TensorView transposed_view{transposed.data(), transposed.size(), {ch, anchors}, ""};
+        std::string err;
+        auto legacy = make_decoder(R"({"type":"yolox","num_classes":1,"strides":[8,16]})", err);
+        auto none = make_decoder(R"({"type":"yolox","num_classes":1,"strides":[8,16],"grid_center_activation":"none"})", err);
+        CHECK(legacy != nullptr && none != nullptr);
+        DetectionResult sigmoid_out, none_out, none_transposed;
+        CHECK(legacy->decode(&row_view, 1, 16, 16, 0.2f, 0.45f, sigmoid_out, err));
+        CHECK(none->decode(&row_view, 1, 16, 16, 0.2f, 0.45f, none_out, err));
+        CHECK(none->decode(&transposed_view, 1, 16, 16, 0.2f, 0.45f,
+                           none_transposed, err));
+        CHECK(sigmoid_out.dets.size() == 1 && none_out.dets.size() == 1);
+        CHECK(none_transposed.dets.size() == 1);
+        CHECK_NEAR(sigmoid_out.dets[0].cx, (1.0f / (1.0f + std::exp(2.0f)) * 8.0f) / 16.0f, 1e-6);
+        CHECK_NEAR(none_out.dets[0].cx, -1.0f, 1e-6);
+        CHECK_NEAR(none_transposed.dets[0].cx, none_out.dets[0].cx, 1e-6);
+        CHECK_NEAR(none_out.dets[0].w, 0.5f, 1e-6);
+
+        CHECK(make_decoder(R"({"type":"yolox","grid_center_activation":"bad"})", err) == nullptr);
+        CHECK(err.find("grid_center_activation") != std::string::npos);
+        CHECK(make_decoder(R"({"type":"yolox","grid_center_activation":1})", err) == nullptr);
+        CHECK(make_decoder(R"({"type":"yolov8","grid_center_activation":"none"})", err) == nullptr);
+        std::printf("D5: explicit YOLOX grid center activation preserves sigmoid and supports none\n");
+    }
+
     // yolov8: [4+nc, N] and [N, 4+nc] layouts decode identically
     {
         // nc=1, 3 anchors: box in pixels on a 100x100 canvas

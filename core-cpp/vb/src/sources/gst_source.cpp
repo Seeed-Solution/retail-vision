@@ -186,6 +186,8 @@ public:
         out.fmt = PixFmt::RGB888;
         out.mem = Mem::Host;
         out.host = pixels->data();
+        out.full_host = out.host;
+        out.full_stride = out.stride;
         out.full_w = w;
         out.full_h = h;
         out.hold = pixels;

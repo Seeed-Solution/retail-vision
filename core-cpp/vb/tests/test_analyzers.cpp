@@ -27,6 +27,10 @@ const char* kZoneFixtures[] = {
     "zone_basic.json",
     "zone_removal.json",
 };
+const char* kTextVoteFixtures[] = {
+    "text_vote_no_stage2.json",
+    "text_vote_basic.json",
+};
 
 }  // namespace
 
@@ -52,6 +56,18 @@ int main(int argc, char** argv) {
     for (const char* f : kZoneFixtures) {
         std::string err;
         auto a = vb::create_analyzer("zone", err);
+        CHECK(a != nullptr);
+        auto j = vb::json_parse(read_file(dir + "/" + f));
+        auto r = vb_fixture::run_analyzer_fixture(*a, j);
+        if (!r.ok) {
+            std::fprintf(stderr, "%s: FAIL: %s\n", f, r.fail.c_str());
+            return 1;
+        }
+        std::printf("  %s: OK\n", f);
+    }
+    for (const char* f : kTextVoteFixtures) {
+        std::string err;
+        auto a = vb::create_analyzer("text_vote", err);
         CHECK(a != nullptr);
         auto j = vb::json_parse(read_file(dir + "/" + f));
         auto r = vb_fixture::run_analyzer_fixture(*a, j);

@@ -9,8 +9,10 @@
 #include <mutex>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 #include "pool.h"
+#include "vb/rate_crop.h"
 
 namespace vb {
 
@@ -129,7 +131,10 @@ void ContextPool::apply_pending_controls(StreamState& s) {
         Analyzer* a = nullptr;
         for (size_t i = 0; i < s.analyzers.size(); ++i)
             if (s.analyzer_names[i] == c.name) a = s.analyzers[i].get();
-        if (!a) {
+        if (c.name == "stage2" && s.stage2) {
+            try { c.ok = rt_->configure_stage2(s, json_parse(c.json), c.err); }
+            catch (const std::exception& e) { c.ok = false; c.err = e.what(); }
+        } else if (!a) {
             c.ok = false;
             c.err = "no analyzer " + c.name + " on stream " + std::to_string(s.index);
         } else {
@@ -158,6 +163,19 @@ void ContextPool::process(const std::shared_ptr<StreamState>& s, FrameBuf& f,
     if (rc != 0) {
         s->metrics.record_state("error", err);
         return;  // frame dropped; the source keeps producing
+    }
+    // Host ROI inference uses local pixels, but all downstream coordinates
+    // remain in the original source geometry. Apply this correction exactly
+    // once before stage2/tracker/analyzers consume the result.
+    if (f.crop_x0 != 0 || f.crop_y0 != 0) {
+        try {
+            CropRectPx crop{f.crop_x0, f.crop_y0, f.w, f.h};
+            res.geom = crop_geom(f.full_w, f.full_h, crop, res.geom.model_w,
+                                 res.geom.model_h, res.geom.align);
+        } catch (const std::exception& e) {
+            s->metrics.record_state("error", e.what());
+            return;
+        }
     }
 
     // §6.12: dev-mode raw tensor passthrough (VBT1), no-op unless enabled.
@@ -192,6 +210,52 @@ void ContextPool::process(const std::shared_ptr<StreamState>& s, FrameBuf& f,
     const std::vector<Track>& alive = *alive_ptr;
     const size_t n_tracks = alive.size();
 
+    // Stage2 is the only pixel analyzer. It runs after tracking and before
+    // the ordinary analyzer chain; a failed read leaves reads empty while the
+    // detection/analyzer path continues.
+    std::vector<Stage2Read> stage2_reads;
+    if (s->stage2) {
+        std::vector<Detection> candidates;
+        candidates.reserve(alive.size());
+        for (const auto& t : alive) if (t.misses == 0) {
+            Detection d = t.det;
+            // Decoder coordinates are on the model canvas. Stage2 requests
+            // are source-normalized, including letterbox reversal.
+            float cx, cy, w, h;
+            res.geom.box_to_source_norm(d.cx, d.cy, d.w, d.h, cx, cy, w, h);
+            d.cx = cx; d.cy = cy; d.w = w; d.h = h; d.track_id = t.track_id;
+            candidates.push_back(d);
+        }
+        std::vector<CropReq> crops = stage2_select_crops(candidates, f.t_mono_s,
+                                                          s->stage2_filter,
+                                                          s->stage2_tracks);
+        std::vector<TensorView> outs(crops.size());
+        std::string s2err;
+        double stage2_start = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        bool stage2_failed = false;
+        if (!crops.empty() && s->stage2->infer_crops(f, crops.data(), crops.size(), outs.data(), s2err) == 0) {
+            stage2_reads.reserve(crops.size());
+            for (size_t i = 0; i < crops.size(); ++i) {
+                float mean = -1, minc = -1;
+                std::string txt = ctc_greedy(outs[i], s->stage2_layout, s->stage2_charset,
+                                              &mean, &minc);
+                if (mean < 0 || minc < 0) { stage2_failed = true; break; }
+                Stage2Read r; r.track_id = crops[i].track_id; r.text = std::move(txt);
+                r.mean_conf = mean; r.min_char_conf = minc; r.seq = f.seq;
+                r.bbox[0] = crops[i].x0; r.bbox[1] = crops[i].y0;
+                r.bbox[2] = crops[i].x1; r.bbox[3] = crops[i].y1;
+                stage2_reads.push_back(std::move(r));
+            }
+        } else if (!crops.empty()) {
+            stage2_failed = true;
+        }
+        if (!crops.empty()) {
+            double stage2_end = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            s->metrics.record_stage2(static_cast<float>((stage2_end - stage2_start) * 1000), stage2_failed);
+            if (stage2_failed) stage2_reads.clear();
+        }
+    }
+
     // Analyzer chain (per-track float attributes + events). The VBR1 attribute
     // block is [track][attribute] with the summed span as its stride (§6.3),
     // while each analyzer writes its own contiguous per-track block: give every
@@ -207,7 +271,10 @@ void ContextPool::process(const std::shared_ptr<StreamState>& s, FrameBuf& f,
     meta.wall_ms = f.wall_ms;
     meta.t_mono_s = f.t_mono_s;
     meta.geom = res.geom;
+    meta.reads = s->stage2 ? &stage2_reads : nullptr;
     std::vector<AnalyzerEvent> events;
+    uint64_t dedup_before = 0;
+    for (auto& a : s->analyzers) dedup_before += a->text_vote_dedup_count();
     size_t attr_off = 0;
     for (auto& a : s->analyzers) {
         const size_t n_attr = a->attr_count();
@@ -224,12 +291,16 @@ void ContextPool::process(const std::shared_ptr<StreamState>& s, FrameBuf& f,
         events.clear();
     }
     for (uint32_t id : removed) {
+        if (s->stage2) s->stage2_tracks.erase(id);
         for (auto& a : s->analyzers) {
             a->on_track_removed(id, f.t_mono_s, events);
             emit_events(*s, meta, events, a->name());
             events.clear();
         }
     }
+    uint64_t dedup_after = 0;
+    for (auto& a : s->analyzers) dedup_after += a->text_vote_dedup_count();
+    if (dedup_after > dedup_before) s->metrics.add_text_vote_dedup(dedup_after - dedup_before);
 
     std::string enc_err;
     if (!encode_frame_record(*s, f, res, alive, attrs, total_attrs, enc_err)) {
@@ -242,26 +313,72 @@ void ContextPool::process(const std::shared_ptr<StreamState>& s, FrameBuf& f,
     }
 
     // Snapshot ring (host RGB copy of the newest frames + track boxes).
-    if (s->ring_cap > 0 && f.host && f.fmt == PixFmt::RGB888) {
+    if (s->ring_cap > 0) {
         SnapshotRingEntry e;
         e.seq = f.seq;
-        e.w = f.w;
-        e.h = f.h;
-        e.pixels.assign(f.host, f.host + static_cast<size_t>(f.h) * f.stride);
-        for (const auto& t : alive) {
+        bool snapshot_ok = false;
+        if (f.host && (f.fmt == PixFmt::RGB888 || f.fmt == PixFmt::BGR888)) {
+            e.w = f.full_w > 0 ? f.full_w : f.w;
+            e.h = f.full_h > 0 ? f.full_h : f.h;
+            const uint8_t* src = f.full_host ? f.full_host : f.host;
+            const int src_stride = f.full_stride > 0 ? f.full_stride : f.stride;
+            const size_t ew = e.w > 0 ? static_cast<size_t>(e.w) : 0;
+            const size_t row_bytes = ew <= std::numeric_limits<size_t>::max() / 3 ? ew * 3 : 0;
+            size_t total_bytes = 0;
+            const bool size_ok = host_rgb_layout_bytes(e.w, e.h, src_stride, total_bytes);
+            if (size_ok) {
+                e.pixels.resize(total_bytes);
+                for (int y = 0; y < e.h; ++y) {
+                    const uint8_t* row = src + static_cast<size_t>(y) * static_cast<size_t>(src_stride);
+                    uint8_t* dst = e.pixels.data() + static_cast<size_t>(y) * row_bytes;
+                    if (f.fmt == PixFmt::RGB888) std::memcpy(dst, row, row_bytes);
+                    else for (int x = 0; x < e.w; ++x) {
+                        const size_t off = static_cast<size_t>(x) * 3;
+                        dst[off + 0] = row[off + 2];
+                        dst[off + 1] = row[off + 1];
+                        dst[off + 2] = row[off + 0];
+                    }
+                }
+                snapshot_ok = true;
+            }
+        } else {
+            std::string snapshot_err;
+            const int source_w = f.full_w > 0 ? f.full_w : f.w;
+            const int source_h = f.full_h > 0 ? f.full_h : f.h;
+            size_t expected_bytes = 0;
+            // Check the full-source RGB budget before the adapter allocates.
+            const bool layout_ok = source_w > 0 &&
+                static_cast<size_t>(source_w) <= kMaxHostRgbBytes / 3u &&
+                host_rgb_layout_bytes(source_w, source_h, source_w * 3, expected_bytes);
+            if (layout_ok)
+                snapshot_ok = ctx->copy_snapshot_rgb(f, e.pixels, e.w, e.h, snapshot_err);
+            if (snapshot_ok && e.w == source_w && e.h == source_h &&
+                e.pixels.size() == expected_bytes) {
+                // valid optional conversion
+            } else {
+                snapshot_ok = false;
+                e.pixels.clear();
+            }
+        }
+        if (!snapshot_ok) {
+            // Snapshot conversion is optional; do not affect inference or
+            // frame accounting when a backend has no conversion capability.
+        } else for (const auto& t : alive) {
             float scx, scy, sw, sh;
             res.geom.box_to_source_norm(t.det.cx, t.det.cy, t.det.w, t.det.h,
                                         scx, scy, sw, sh);
             SnapBox b;
             b.track_id = t.track_id;
-            b.x0 = (scx - sw / 2) * f.w;
-            b.y0 = (scy - sh / 2) * f.h;
-            b.x1 = (scx + sw / 2) * f.w;
-            b.y1 = (scy + sh / 2) * f.h;
+            b.x0 = (scx - sw / 2) * e.w;
+            b.y0 = (scy - sh / 2) * e.h;
+            b.x1 = (scx + sw / 2) * e.w;
+            b.y1 = (scy + sh / 2) * e.h;
             e.boxes.push_back(b);
         }
-        s->ring.push_back(std::move(e));
-        while (s->ring.size() > static_cast<size_t>(s->ring_cap)) s->ring.pop_front();
+        if (snapshot_ok) {
+            s->ring.push_back(std::move(e));
+            while (s->ring.size() > static_cast<size_t>(s->ring_cap)) s->ring.pop_front();
+        }
     }
 
     float inference_ms = res.preprocess_ms + res.inference_ms + res.postprocess_ms;
@@ -316,8 +433,8 @@ bool ContextPool::encode_frame_record(StreamState& s, const FrameBuf& f,
     r.stream_index = s.index;
     r.seq = f.seq;
     r.wall_ms = f.wall_ms;
-    r.src_w = f.w;
-    r.src_h = f.h;
+    r.src_w = f.full_w > 0 ? f.full_w : f.w;
+    r.src_h = f.full_h > 0 ? f.full_h : f.h;
     r.model_w = res.geom.model_w;
     r.model_h = res.geom.model_h;
     r.scale = res.geom.scale;

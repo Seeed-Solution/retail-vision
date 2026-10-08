@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -17,6 +18,13 @@
 #include "pool.h"
 #include "snapshot.h"
 #include "vb/letterbox.h"
+#if defined(VB_HAVE_JPEG)
+#include <turbojpeg.h>
+#endif
+
+#if defined(VB_HAVE_CPU_BACKEND)
+namespace vb { std::unique_ptr<Stage2Context> make_cpu_stage2(const Stage2Spec&, std::string&); }
+#endif
 
 namespace vb {
 
@@ -170,6 +178,43 @@ bool has_so_suffix(const std::string& name) {
     return name.size() > 3 && name.compare(name.size() - 3, 3, ".so") == 0;
 }
 
+bool strict_b64_size(const std::string& s, size_t max_bytes, std::string& err) {
+    if (s.empty() || (s.size() & 3) != 0 || s.size() > 2u * 1024u * 1024u) {
+        err = "jpeg_b64 must be padded base64 under 2 MiB"; return false;
+    }
+    size_t pad = (!s.empty() && s.back() == '=') + (s.size() > 1 && s[s.size()-2] == '=');
+    for (size_t i=0; i<s.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                  (c >= '0' && c <= '9') || c == '+' || c == '/' ||
+                  (c == '=' && i >= s.size() - pad);
+        if (!ok) { err = "jpeg_b64 contains invalid base64"; return false; }
+    }
+    size_t decoded = s.size() / 4 * 3 - pad;
+    if (decoded == 0 || decoded > max_bytes) { err = "image too large"; return false; }
+    if (pad && s.find('=', 0) < s.size() - pad) { err = "jpeg_b64 has invalid padding"; return false; }
+    return true;
+}
+
+std::vector<uint8_t> decode_b64(const std::string& s) {
+    auto digit = [](char c) -> uint32_t {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        return c == '+' ? 62 : c == '/' ? 63 : 0;
+    };
+    std::vector<uint8_t> out;
+    out.reserve(s.size() / 4 * 3);
+    for (size_t i = 0; i < s.size(); i += 4) {
+        uint32_t n = digit(s[i]) << 18 | digit(s[i + 1]) << 12 |
+                     digit(s[i + 2]) << 6 | digit(s[i + 3]);
+        out.push_back(static_cast<uint8_t>(n >> 16));
+        if (s[i + 2] != '=') out.push_back(static_cast<uint8_t>(n >> 8));
+        if (s[i + 3] != '=') out.push_back(static_cast<uint8_t>(n));
+    }
+    return out;
+}
+
 }  // namespace
 
 // ---- RuntimeConfig ----
@@ -182,6 +227,11 @@ RuntimeConfig RuntimeConfig::from_json(const Json& j, std::string& err,
         const Json& backend = j.at("backend");
         c.backend_name = backend.at("name").get<std::string>();
         c.backend_json = json_dump(backend);
+        auto stage2 = j.find("stage2");
+        if (stage2 != j.end() && !stage2->is_null()) {
+            if (!stage2->is_object()) { err = "stage2 must be an object"; return c; }
+            c.stage2_json = stage2->dump();
+        }
         auto read_int = [&](const char* key, int dflt) {
             auto it = j.find(key);
             if (it != j.end() && !it->is_null()) return it->get<int>();
@@ -363,6 +413,12 @@ bool Runtime::start(std::string& err) {
     // plugin that fails to load (or an incomplete API table) aborts startup
     // instead of being skipped silently, and no add() can name an unknown path.
     if (!load_configured_plugins(err)) return false;
+    if (!cfg_.stage2_json.empty()) {
+        auto image = std::make_unique<StreamState>();
+        if (!configure_stage2(*image, json_parse(cfg_.stage2_json), err, false)) return false;
+        image_stage2_ = std::move(image);
+        image_ready_ = true;
+    }
     for (int i = 0; i < cfg_.contexts; ++i) {
         auto ctx = backend_->create_context(i, err);
         if (!ctx) return false;
@@ -370,6 +426,16 @@ bool Runtime::start(std::string& err) {
     }
     pool_ = std::make_unique<ContextPool>(this);
     pool_->start();
+    {
+        std::lock_guard<std::mutex> lk(add_mu_);
+        add_stopping_ = false;
+    }
+    add_thread_ = std::thread([this] { add_worker(); });
+    {
+        std::lock_guard<std::mutex> lk(image_mu_);
+        image_stopping_ = false;
+    }
+    image_thread_ = std::thread([this] { image_thread(); });
     stats_thread_ = std::thread([this] { stats_thread(); });
     return true;
 }
@@ -382,6 +448,26 @@ void Runtime::stop() {
     // event queue is over the backpressure limit, and the pool join would wait
     // for them forever.
     writer_.request_stop();
+    std::vector<std::shared_ptr<AddRequest>> cancelled_adds;
+    {
+        std::lock_guard<std::mutex> lk(add_mu_);
+        add_stopping_ = true;
+        for (auto& r : add_queue_) { r->cancelled = true; cancelled_adds.push_back(r); }
+        add_queue_.clear();
+        for (auto& kv : opening_) kv.second->cancelled = true;
+    }
+    for (const auto& r : cancelled_adds) reply(r->req, false, Json(), "add cancelled by stop");
+    add_cv_.notify_all();
+    if (add_thread_.joinable()) add_thread_.join();
+    image_ready_ = false;
+    {
+        std::lock_guard<std::mutex> lk(image_mu_);
+        image_stopping_ = true;
+        image_queue_.clear();
+    }
+    image_cv_.notify_all();
+    if (image_thread_.joinable()) image_thread_.join();
+    image_stage2_.reset();
     if (pool_) pool_->stop();
     // Stop source threads: mark removing, join, then drop the streams.
     std::vector<std::pair<uint32_t, std::thread>> threads;
@@ -449,7 +535,7 @@ void Runtime::emit_hello() {
     j["model_hw"] = Json::array({hw.first, hw.second});
     j["model_sha256"] = backend_->model_sha256();
     j["attr_names"] = Json::array();
-    j["stage2_ready"] = false;
+    j["stage2_ready"] = image_ready_.load();
     j["pid"] = static_cast<int>(::getpid());
     push_reply_record(j);
 }
@@ -458,6 +544,16 @@ void Runtime::emit_stats() {
     struct rusage ru;
     Json j;
     j["op"] = "stats";
+    const auto mono_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    // Snapshot timestamps: monotonic_ms supports interval deltas within one
+    // native process; wall_ms is Unix epoch time for cross-process evidence.
+    j["stats_monotonic_ms"] = mono_ms;
+    j["stats_wall_ms"] = wall_ms;
+    j["stats_pid"] = static_cast<int>(::getpid());
+    j["effective_contexts"] = contexts_.size();
     if (::getrusage(RUSAGE_SELF, &ru) == 0) {
         long rss_kb;
 #if defined(__APPLE__)
@@ -506,6 +602,7 @@ bool Runtime::handle_line(const Json& line) {
         else if (op == "set_threshold") op_set_threshold(line);
         else if (op == "configure_analyzer") op_configure_analyzer(line);
         else if (op == "snapshot") op_snapshot(line);
+        else if (op == "infer_image") op_infer_image(line);
         else if (op == "stop") op_stop(line);
         else reply(req, false, Json(), "unknown op: " + (op.empty() ? "?" : op));
         stop = (op == "stop");
@@ -518,6 +615,73 @@ bool Runtime::handle_line(const Json& line) {
               std::string("bad ") + (op.empty() ? "command" : op) + ": " + e.what());
     }
     return stop;
+}
+
+void Runtime::op_infer_image(const Json& line) {
+    std::string req = json_get_str(line, "req");
+#if !defined(VB_HAVE_JPEG)
+    reply(req, false, Json(), "jpeg unsupported"); return;
+#endif
+    if (!image_ready_) { reply(req, false, Json(), "stage2 not configured"); return; }
+    auto it = line.find("jpeg_b64");
+    if (it == line.end() || !it->is_string()) { reply(req, false, Json(), "missing or invalid field: jpeg_b64"); return; }
+    std::string err;
+    if (!strict_b64_size(it->get<std::string>(), 1024u * 1024u, err)) { reply(req, false, Json(), err); return; }
+    std::string queue_error;
+    {
+        std::lock_guard<std::mutex> lk(image_mu_);
+        if (image_stopping_) queue_error = "runtime stopping";
+        else if (image_queue_.size() >= kImageQueueLimit) queue_error = "infer_image queue full";
+        else image_queue_.push_back(line);
+    }
+    // Writer may block; never hold the image queue mutex while replying.
+    if (!queue_error.empty()) { reply(req, false, Json(), queue_error); return; }
+    image_cv_.notify_one();
+}
+
+void Runtime::image_thread() {
+    for (;;) {
+        Json line;
+        {
+            std::unique_lock<std::mutex> lk(image_mu_);
+            image_cv_.wait(lk, [this] { return image_stopping_ || !image_queue_.empty(); });
+            if (image_queue_.empty() && image_stopping_) return;
+            line = std::move(image_queue_.front());
+            image_queue_.pop_front();
+        }
+        const std::string req = json_get_str(line, "req");
+#if defined(VB_HAVE_JPEG)
+        try {
+            auto jpeg = decode_b64(line.at("jpeg_b64").get<std::string>());
+            struct JpegHandle { tjhandle p = tjInitDecompress(); ~JpegHandle() { if (p) tjDestroy(p); } } decoder;
+            int w = 0, h = 0, subsample = 0, color = 0;
+            if (!decoder.p || tjDecompressHeader3(decoder.p, jpeg.data(), jpeg.size(), &w, &h, &subsample, &color) != 0 ||
+                w <= 0 || h <= 0 || w > 8192 || h > 8192 || static_cast<uint64_t>(w) * h > 16777216) {
+                reply(req, false, Json(), "bad jpeg"); continue;
+            }
+            std::vector<uint8_t> rgb(static_cast<size_t>(w) * h * 3);
+            if (tjDecompress2(decoder.p, jpeg.data(), jpeg.size(), rgb.data(), w, w * 3, h,
+                              TJPF_RGB, TJFLAG_STOPONWARNING) != 0) {
+                reply(req, false, Json(), "bad jpeg"); continue;
+            }
+            TensorView out;
+            std::string err;
+            double began = now_s();
+            auto& image = *image_stage2_;
+            if (image.stage2->infer_rgb(rgb.data(), w, h, w * 3, &out, err) != 0) {
+                reply(req, false, Json(), err); continue;
+            }
+            float mean = -1, minc = -1;
+            std::string text = ctc_greedy(out, image.stage2_layout, image.stage2_charset, &mean, &minc);
+            if (mean < 0 || minc < 0) { reply(req, false, Json(), "invalid stage2 output"); continue; }
+            Json applied{{"text", text}, {"mean_conf", mean}, {"min_char_conf", minc},
+                         {"w", w}, {"h", h}, {"infer_ms", (now_s() - began) * 1000}};
+            reply(req, true, applied, "");
+        } catch (const std::exception& e) { reply(req, false, Json(), std::string("infer_image: ") + e.what()); }
+#else
+        reply(req, false, Json(), "jpeg unsupported");
+#endif
+    }
 }
 
 void Runtime::op_add(const Json& line) {
@@ -548,7 +712,45 @@ void Runtime::op_add(const Json& line) {
         spec.score_threshold = sth->get<float>();
     }
     auto opts = sj->find("options");
-    spec.options_json = (opts != sj->end() && !opts->is_null()) ? json_dump(*opts) : "{}";
+    if (opts != sj->end()) {
+        if (!opts->is_object()) {
+            reply(req, false, Json(), "stream options must be an object");
+            return;
+        }
+        try {
+            if (auto it = opts->find("max_fps"); it != opts->end()) {
+                if (!it->is_number() || !std::isfinite(it->get<double>()) || it->get<double>() < 0.0) {
+                    reply(req, false, Json(), "stream options.max_fps must be a finite number >= 0");
+                    return;
+                }
+                spec.max_fps = static_cast<float>(it->get<double>());
+            }
+            if (auto it = opts->find("roi_crop"); it != opts->end() && !it->is_null()) {
+                if (!it->is_array() || it->size() != 4) {
+                    reply(req, false, Json(), "stream options.roi_crop must be null or 4 numbers");
+                    return;
+                }
+                for (size_t i = 0; i < 4; ++i) {
+                    if (!it->at(i).is_number() || !std::isfinite(it->at(i).get<double>())) {
+                        reply(req, false, Json(), "stream options.roi_crop must contain finite numbers");
+                        return;
+                    }
+                    spec.roi_crop[i] = static_cast<float>(it->at(i).get<double>());
+                }
+                if (!(spec.roi_crop[0] >= 0 && spec.roi_crop[0] < spec.roi_crop[2] && spec.roi_crop[2] <= 1 &&
+                      spec.roi_crop[1] >= 0 && spec.roi_crop[1] < spec.roi_crop[3] && spec.roi_crop[3] <= 1 &&
+                      spec.roi_crop[2] - spec.roi_crop[0] >= .05f && spec.roi_crop[3] - spec.roi_crop[1] >= .05f)) {
+                    reply(req, false, Json(), "stream options.roi_crop bounds/span invalid");
+                    return;
+                }
+                spec.has_roi_crop = true;
+            }
+            spec.options_json = json_dump(*opts);
+        } catch (const std::exception& e) {
+            reply(req, false, Json(), std::string("invalid stream options: ") + e.what());
+            return;
+        }
+    }
 
     static const Json kNoAnalyzers = Json::array();
     const Json& analyzers = line.contains("analyzers") ? line.at("analyzers") : kNoAnalyzers;
@@ -556,18 +758,196 @@ void Runtime::op_add(const Json& line) {
         reply(req, false, Json(), "invalid field: analyzers");
         return;
     }
-    std::shared_ptr<StreamState> s = add_stream_locked(spec, analyzers, err);
-    if (!s) {
-        reply(req, false, Json(), err);
-        return;
+    auto request = std::make_shared<AddRequest>();
+    request->req = req;
+    request->spec = spec;
+    request->analyzers = analyzers;
+    {
+        std::lock_guard<std::mutex> lk(add_mu_);
+        std::lock_guard<std::mutex> slk(streams_mu_);
+        if (stopping_) { reply(req, false, Json(), "runtime stopping"); return; }
+        if (streams_.count(spec.index) || opening_.count(spec.index)) {
+            reply(req, false, Json(), "stream index already in use: " + std::to_string(spec.index));
+            return;
+        }
+        if (add_queue_.size() + add_inflight_ >= 16) {
+            reply(req, false, Json(), "add queue full");
+            return;
+        }
+        opening_[spec.index] = request;
+        add_queue_.push_back(request);
     }
-    Json applied;
-    applied["stream_index"] = spec.index;
-    reply(req, true, applied, "");
+    add_cv_.notify_one();
+}
+
+void Runtime::add_worker() {
+    for (;;) {
+        std::shared_ptr<AddRequest> request;
+        {
+            std::unique_lock<std::mutex> lk(add_mu_);
+            add_cv_.wait(lk, [this] { return add_stopping_ || !add_queue_.empty(); });
+            if (add_queue_.empty() && add_stopping_) return;
+            request = std::move(add_queue_.front());
+            add_queue_.pop_front();
+            ++add_inflight_;
+        }
+        std::string err;
+        std::shared_ptr<StreamState> s;
+        if (!request->cancelled && !stopping_)
+            s = add_stream_locked(request->spec, request->analyzers, request, err);
+        if (!s && err.empty()) err = request->cancelled ? "add cancelled" : "runtime stopping";
+        {
+            std::lock_guard<std::mutex> lk(add_mu_);
+            std::lock_guard<std::mutex> slk(streams_mu_);
+            auto ri = opening_.find(request->spec.index);
+            if (ri != opening_.end() && ri->second == request)
+                opening_.erase(ri);
+            --add_inflight_;
+        }
+        if (s) {
+            Json applied; applied["stream_index"] = request->spec.index;
+            reply(request->req, true, applied, "");
+        } else {
+            reply(request->req, false, Json(), err);
+        }
+    }
+}
+
+bool Runtime::configure_stage2(StreamState& target, const Json& x, std::string& err, bool stream) {
+    StreamState s;
+    err.clear();
+    try {
+        if (!x.is_object())
+            throw std::invalid_argument("stage2 config must be an object");
+        static constexpr const char* kStage2Keys[] = {
+            "model_path", "input_hw", "charset", "color", "ctc_layout", "backend",
+            "fallback_cpu", "scale", "mean", "expand", "min_gap_s", "min_score",
+            "max_per_track", "max_crops_per_frame", "classes", "roi",
+        };
+        for (auto it = x.begin(); it != x.end(); ++it) {
+            bool known = false;
+            for (const char* key : kStage2Keys) {
+                if (it.key() == key) { known = true; break; }
+            }
+            if (!known)
+                throw std::invalid_argument("unknown stage2 key: " + it.key());
+        }
+        if (!x.contains("model_path") || !x.at("model_path").is_string() ||
+            !x.contains("input_hw") || !x.at("input_hw").is_array() || x.at("input_hw").size() != 2 ||
+            !x.contains("charset") || !x.at("charset").is_array() || x.at("charset").size() < 2)
+            throw std::invalid_argument("stage2 requires model_path, input_hw and charset");
+        auto integer = [](const Json& v, int64_t lo, int64_t hi) -> int {
+            if (!v.is_number_integer()) throw std::invalid_argument("stage2 integer required");
+            if (v.is_number_unsigned()) {
+                uint64_t n = v.get<uint64_t>();
+                if (n > static_cast<uint64_t>(hi)) throw std::invalid_argument("stage2 integer out of range");
+                if (n < static_cast<uint64_t>(lo)) throw std::invalid_argument("stage2 integer out of range");
+                return static_cast<int>(n);
+            }
+            int64_t n = v.get<int64_t>();
+            if (n < lo || n > hi) throw std::invalid_argument("stage2 integer out of range");
+            return static_cast<int>(n);
+        };
+        auto number = [](const Json& v, double lo, double hi) -> double {
+            if (!v.is_number()) throw std::invalid_argument("stage2 number required");
+            double n = v.get<double>();
+            if (!std::isfinite(n) || n < lo || n > hi) throw std::invalid_argument("stage2 number out of range");
+            return n;
+        };
+        auto optional_number = [&](const char* k, double d, double lo, double hi) {
+            return x.contains(k) ? number(x.at(k), lo, hi) : d;
+        };
+        auto optional_integer = [&](const char* k, int d, int lo, int hi) {
+            return x.contains(k) ? integer(x.at(k), lo, hi) : d;
+        };
+        Stage2Spec ss;
+        ss.model_path = x.at("model_path").get<std::string>();
+        ss.in_h = integer(x.at("input_hw")[0], 1, 4096);
+        ss.in_w = integer(x.at("input_hw")[1], 1, 4096);
+        for (const auto& c : x.at("charset")) {
+            if (!c.is_string()) throw std::invalid_argument("stage2 charset must contain strings");
+            s.stage2_charset.push_back(c.get<std::string>());
+        }
+        if (!s.stage2_charset.front().empty()) throw std::invalid_argument("stage2 charset[0] must be blank");
+        std::string color = x.value("color", std::string("rgb"));
+        if (color != "rgb" && color != "bgr") throw std::invalid_argument("stage2 color must be rgb or bgr");
+        ss.bgr = color == "bgr";
+        ss.scale = static_cast<float>(optional_number("scale", 1.0 / 255, 0, std::numeric_limits<float>::max()));
+        if (ss.scale <= 0) throw std::invalid_argument("stage2 scale must be positive");
+        if (x.contains("mean")) {
+            const auto& mean = x.at("mean");
+            if (!mean.is_array() || mean.size() != 3) throw std::invalid_argument("stage2 mean must have 3 numbers");
+            for (int i = 0; i < 3; ++i) ss.mean[i] = static_cast<float>(number(mean[i], -std::numeric_limits<float>::max(), std::numeric_limits<float>::max()));
+        }
+        s.stage2_filter.expand = static_cast<float>(optional_number("expand", .08, 0, .5));
+        s.stage2_filter.min_gap_s = optional_number("min_gap_s", 0, 0, std::numeric_limits<double>::max());
+        s.stage2_filter.min_score = static_cast<float>(optional_number("min_score", 0, 0, 1));
+        s.stage2_filter.max_per_track = optional_integer("max_per_track", 7, 1, 64);
+        s.stage2_filter.max_crops_per_frame = optional_integer("max_crops_per_frame", 4, 1, 16);
+        if (x.contains("classes")) {
+            if (!x.at("classes").is_array()) throw std::invalid_argument("stage2 classes must be an array");
+            for (const auto& c : x.at("classes")) s.stage2_filter.classes.push_back(integer(c, 0, INT32_MAX));
+        }
+        if (x.contains("roi") && !x.at("roi").is_null()) {
+            const auto& roi = x.at("roi");
+            if (!roi.is_array() || roi.size() < 3 || roi.size() > 16) throw std::invalid_argument("stage2 roi must contain 3..16 points");
+            for (const auto& p : roi) {
+                if (!p.is_array() || p.size() != 2) throw std::invalid_argument("stage2 roi point must contain x,y");
+                s.stage2_filter.roi_polygon.push_back(static_cast<float>(number(p[0], 0, 1)));
+                s.stage2_filter.roi_polygon.push_back(static_cast<float>(number(p[1], 0, 1)));
+            }
+        }
+        std::string layout = x.value("ctc_layout", std::string("ct"));
+        if (layout != "ct" && layout != "tc") throw std::invalid_argument("stage2 ctc_layout must be ct or tc");
+        s.stage2_layout = layout == "ct" ? CtcLayout::CT : CtcLayout::TC;
+        s.stage2_spec = ss;
+        std::string requested = x.value("backend", std::string());
+        if (requested != "" && requested != "cpu") throw std::invalid_argument("stage2 backend must be empty or cpu");
+        bool fallback = x.value("fallback_cpu", false);
+        std::string reason;
+        bool fallback_used = false;
+        if (requested != "cpu") s.stage2 = backend_->create_stage2(ss, err);
+        if (!s.stage2 && (requested == "cpu" || fallback)) {
+            if (requested != "cpu") reason = err;
+#if defined(VB_HAVE_CPU_BACKEND)
+            s.stage2 = make_cpu_stage2(ss, err);
+#else
+            err = "stage2 cpu backend is not built";
+#endif
+            s.stage2_backend = "cpu";
+            fallback_used = requested != "cpu";
+            if (fallback_used && reason.empty()) reason = "requested backend unavailable; using cpu fallback";
+        } else s.stage2_backend = backend_->name();
+        if (!s.stage2) { if (err.empty()) err = "stage2 unsupported"; return false; }
+        if (stream && s.stage2_backend == "cpu" && std::string(backend_->name()) == "rknn") {
+            err = "stage2 cpu needs host frames"; return false;
+        }
+        std::vector<uint8_t> zero(static_cast<size_t>(ss.in_w) * ss.in_h * 3);
+        TensorView output;
+        if (s.stage2->infer_rgb(zero.data(), ss.in_w, ss.in_h, ss.in_w * 3, &output, err) != 0) return false;
+        if (output.dims.size() != 2) throw std::invalid_argument("stage2 output must be 2D after batch");
+        int64_t classes = output.dims[s.stage2_layout == CtcLayout::CT ? 0 : 1];
+        if (classes != static_cast<int64_t>(s.stage2_charset.size())) {
+            err = "charset size " + std::to_string(s.stage2_charset.size()) + " != model classes " + std::to_string(classes);
+            return false;
+        }
+        target.stage2 = std::move(s.stage2);
+        target.stage2_spec = s.stage2_spec;
+        target.stage2_charset = std::move(s.stage2_charset);
+        target.stage2_layout = s.stage2_layout;
+        target.stage2_filter = std::move(s.stage2_filter);
+        target.stage2_backend = s.stage2_backend;
+        target.stage2_fallback_reason = reason;
+        target.stage2_tracks.clear();
+        target.metrics.set_stage2_backend(target.stage2_backend, fallback_used);
+        err.clear();
+        return true;
+    } catch (const std::exception& e) { err = std::string("stage2 config: ") + e.what(); return false; }
 }
 
 std::shared_ptr<StreamState> Runtime::add_stream_locked(const StreamSpec& spec,
                                                         const Json& analyzers,
+                                                        const std::shared_ptr<AddRequest>& request,
                                                         std::string& err) {
     {
         std::lock_guard<std::mutex> lk(streams_mu_);
@@ -594,6 +974,15 @@ std::shared_ptr<StreamState> Runtime::add_stream_locked(const StreamSpec& spec,
     s->metrics.record_state("starting", "");
     s->metrics.set_decode_path(src->decode_path());
     s->dev_limiter.set_max_fps(cfg_.dev.max_fps);
+    s->rate_limiter.set_max_fps(spec.max_fps);
+
+    for (const auto& aj : analyzers) {
+        if (!aj.is_object()) { err = "analyzer entry must be an object"; return nullptr; }
+        if (json_get_str(aj, "name") != "stage2") continue;
+        if (s->stage2) { err = "only one stage2 analyzer is allowed"; return nullptr; }
+        auto config = aj.find("config");
+        if (config == aj.end() || !configure_stage2(*s, *config, err)) return nullptr;
+    }
 
     // Analyzers: built-in names, or "plugin:<id>" for a plugin registered from
     // analyzers.plugins. The name is what configure_analyzer matches against,
@@ -614,8 +1003,12 @@ std::shared_ptr<StreamState> Runtime::add_stream_locked(const StreamSpec& spec,
             }
             cfg_json = json_dump(*cj);
         }
+        if (name == "stage2") {
+            continue;
+        }
         std::unique_ptr<Analyzer> a = make_stream_analyzer(name, err);
         if (!a) return nullptr;
+        a->set_stage2_available(s->stage2 != nullptr);
         // §6.2: with tracker.enabled=false detections arrive as track_id=0
         // single-frame tracks, so an analyzer that needs a track lifecycle
         // cannot be enabled on this runtime.
@@ -636,6 +1029,8 @@ std::shared_ptr<StreamState> Runtime::add_stream_locked(const StreamSpec& spec,
     }
 
     emit_stream_state(s, "starting", "");
+    if (!s->stage2_fallback_reason.empty())
+        emit_stream_state(s, "starting", "stage2 fallback: " + s->stage2_fallback_reason);
 
     // Open the source (add-phase deadline: open_timeout_s), §6.3/§6.5.2.
     double deadline = now_s() + cfg_.open_timeout_s;
@@ -649,30 +1044,86 @@ std::shared_ptr<StreamState> Runtime::add_stream_locked(const StreamSpec& spec,
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    {
-        std::lock_guard<std::mutex> lk(streams_mu_);
-        if (stopping_) {
-            err = "runtime stopping";
+    // Source open/read/crop are deliberately outside streams_mu_: an add
+    // handshake must not pause stats, existing stream controls, or remove.
+    std::optional<FrameBuf> first;
+    if (spec.has_roi_crop) {
+        first.emplace();
+        double first_deadline = now_s() + cfg_.open_timeout_s;
+        bool got = false;
+        while (!request->cancelled && !stopping_ && now_s() < first_deadline) {
+            int rr = src->read(*first, 100);
+            if (rr == 1) { got = true; break; }
+            if (rr < 0) { err = "source read failed during roi handshake"; break; }
+        }
+        if (!got) {
+            if (err.empty()) err = request->cancelled ? "add cancelled" : "roi handshake timeout";
+            src->close();
             return nullptr;
         }
-        streams_[spec.index] = s;
-        source_threads_.emplace_back(spec.index,
-                                     std::thread([this, s, src = std::move(src)]() mutable {
-                                         source_thread(s, std::move(src));
-                                     }));
+        try {
+            CropRectPx crop = crop_rect_px(spec.roi_crop,
+                                           first->full_w > 0 ? first->full_w : first->w,
+                                           first->full_h > 0 ? first->full_h : first->h);
+            if (!host_crop_frame(*first, crop, err)) { src->close(); return nullptr; }
+        } catch (const std::exception& e) {
+            err = std::string("roi crop: ") + e.what();
+            src->close();
+            return nullptr;
+        }
     }
+    // Reservation identity is checked under add_mu_. A cancelled request may
+    // have been erased and replaced by a new request using the same index.
+    bool registered = false;
+    {
+        std::lock_guard<std::mutex> alk(add_mu_);
+        std::lock_guard<std::mutex> slk(streams_mu_);
+        auto ri = opening_.find(spec.index);
+        if (stopping_ || request->cancelled || ri == opening_.end() || ri->second != request ||
+            streams_.count(spec.index)) {
+            err = request->cancelled ? "add cancelled" : "runtime stopping or reservation lost";
+        } else {
+            streams_[spec.index] = s;
+            source_threads_.emplace_back(spec.index,
+                                         std::thread([this, s, src = std::move(src), first = std::move(first)]() mutable {
+                                             source_thread(s, std::move(src), std::move(first));
+                                         }));
+            registered = true;
+        }
+    }
+    if (!registered) { src->close(); return nullptr; }
     return s;
 }
 
 void Runtime::source_thread(std::shared_ptr<StreamState> s,
-                            std::unique_ptr<FrameSource> src) {
+                            std::unique_ptr<FrameSource> src,
+                            std::optional<FrameBuf> first) {
     FrameBuf f;
     for (;;) {
         if (stopping_) break;
         if (s->removing) break;
-        int r = src->read(f, 100);
+        int r = first.has_value() ? 1 : src->read(f, 100);
+        if (first.has_value()) { f = std::move(*first); first.reset(); }
         if (r == 1) {
             f.stream_index = s->index;
+            if (s->spec.has_roi_crop && f.full_w > 0 && f.full_h > 0 &&
+                (f.w == f.full_w && f.h == f.full_h)) {
+                try {
+                    CropRectPx crop = crop_rect_px(s->spec.roi_crop, f.full_w, f.full_h);
+                    std::string crop_err;
+                    if (!host_crop_frame(f, crop, crop_err)) {
+                        s->metrics.record_state("error", crop_err);
+                        continue;
+                    }
+                } catch (const std::exception& e) {
+                    s->metrics.record_state("error", std::string("roi crop: ") + e.what());
+                    continue;
+                }
+            }
+            if (!s->rate_limiter.accept(f.t_mono_s)) {
+                s->metrics.add_rate_skipped(1);
+                continue;
+            }
             if (!s->got_first_frame.exchange(true)) {
                 s->metrics.record_state("running", "");
                 Json j;
@@ -717,14 +1168,32 @@ void Runtime::op_remove(const Json& line) {
         return;
     }
     std::shared_ptr<StreamState> s;
+    std::shared_ptr<AddRequest> pending;
     {
+        // Keep the reservation lookup and stream lookup in one lock order so
+        // remove cannot observe a gap and race an index reuse.
+        std::lock_guard<std::mutex> alk(add_mu_);
         std::lock_guard<std::mutex> lk(streams_mu_);
         auto it = streams_.find(idx);
         if (it == streams_.end()) {
-            reply(req, false, Json(), "no stream " + std::to_string(idx));
-            return;
+            auto ai = opening_.find(idx);
+            if (ai != opening_.end()) {
+                pending = ai->second;
+                pending->cancelled = true;
+                opening_.erase(ai);
+            }
+        } else {
+            s = it->second;
         }
-        s = it->second;
+    }
+    if (pending || !s) {
+        if (pending) {
+            Json applied; applied["stream_index"] = idx;
+            reply(req, true, applied, "");
+        } else {
+            reply(req, false, Json(), "no stream " + std::to_string(idx));
+        }
+        return;
     }
     // 1) Stop new work on this stream. `removing` is atomic, so this does not
     //    wait for the frame lock a context thread holds for a whole frame.
@@ -877,7 +1346,10 @@ void Runtime::op_configure_analyzer(const Json& line) {
                 Analyzer* a = nullptr;
                 for (size_t i = 0; i < s->analyzers.size(); ++i)
                     if (s->analyzer_names[i] == name) a = s->analyzers[i].get();
-                if (!a) {
+                if (name == "stage2" && s->stage2) {
+                    try { ok = configure_stage2(*s, json_parse(cfg_json), err); }
+                    catch (const std::exception& e) { ok = false; err = e.what(); }
+                } else if (!a) {
                     ok = false;
                     err = "no analyzer " + name + " on stream " + std::to_string(s->index);
                 } else {

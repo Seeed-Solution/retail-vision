@@ -1,0 +1,164 @@
+{
+  "patterns": [
+    [
+      {
+        "set": "京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼",
+        "min": 1,
+        "max": 1
+      },
+      {
+        "set": "ABCDEFGHJKLMNPQRSTUVWXYZ",
+        "min": 1,
+        "max": 1
+      },
+      {
+        "set": "ABCDEFGHJKLMNPQRSTUVWXYZ0123456789",
+        "min": 5,
+        "max": 5
+      }
+    ],
+    [
+      {
+        "set": "京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼",
+        "min": 1,
+        "max": 1
+      },
+      {
+        "set": "ABCDEFGHJKLMNPQRSTUVWXYZ",
+        "min": 1,
+        "max": 1
+      },
+      {
+        "set": "ABCDEFGHJKLMNPQRSTUVWXYZ0123456789",
+        "min": 6,
+        "max": 6
+      }
+    ]
+  ],
+  "cases": [
+    {
+      "text": "京A12345",
+      "expect": true
+    },
+    {
+      "text": "粤B12345",
+      "expect": true
+    },
+    {
+      "text": "京A123456",
+      "expect": true
+    },
+    {
+      "text": "粤BD12345",
+      "expect": true
+    },
+    {
+      "text": "沪C1230D",
+      "expect": true
+    },
+    {
+      "text": "藏A12345",
+      "expect": true
+    },
+    {
+      "text": "琼B11111",
+      "expect": true
+    },
+    {
+      "text": "川Z98765",
+      "expect": true
+    },
+    {
+      "text": "皖K123456",
+      "expect": true
+    },
+    {
+      "text": "津F67890",
+      "expect": true
+    },
+    {
+      "text": "新Q123456",
+      "expect": true
+    },
+    {
+      "text": "蒙A99999",
+      "expect": true
+    },
+    {
+      "text": "京AD12345",
+      "expect": true
+    },
+    {
+      "text": "京a12345",
+      "expect": false
+    },
+    {
+      "text": "京A1234",
+      "expect": false
+    },
+    {
+      "text": "京A1234567",
+      "expect": false
+    },
+    {
+      "text": "A12345",
+      "expect": false
+    },
+    {
+      "text": "京12345",
+      "expect": false
+    },
+    {
+      "text": "京AI2345",
+      "expect": false
+    },
+    {
+      "text": "京AO2345",
+      "expect": false
+    },
+    {
+      "text": "使A12345",
+      "expect": false
+    },
+    {
+      "text": "港A12345",
+      "expect": false
+    },
+    {
+      "text": "京A-1234",
+      "expect": false
+    },
+    {
+      "text": "京A 12345",
+      "expect": false
+    },
+    {
+      "text": "京A123O0",
+      "expect": false
+    },
+    {
+      "text": "京a123456",
+      "expect": false
+    },
+    {
+      "text": "粤B.12345",
+      "expect": false
+    },
+    {
+      "text": "京AA12345",
+      "expect": true
+    },
+    {
+      "text": "O012345",
+      "expect": false
+    },
+    {
+      "text": "冀B8606学",
+      "expect": false
+    },
+    {
+      "text": "京A1234学",
+      "expect": false
+    }
+  ]
+}

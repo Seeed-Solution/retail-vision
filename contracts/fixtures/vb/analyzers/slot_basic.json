@@ -1,0 +1,16 @@
+{
+  "analyzer": "slot_coverage",
+  "config": {
+    "occupied_ratio": 0.5,
+    "free_ratio": 0.2,
+    "hold_s": 0.0,
+    "slots": [{"id":"A1", "polygon":[[0.2,0.2],[0.8,0.2],[0.8,0.8],[0.2,0.8]]}]
+  },
+  "frames": [
+    {"seq":1,"t":0.0,"tracks":[{"track_id":7,"cx":0.5,"cy":0.2,"w":0.4,"h":1.2,"class_id":0,"misses":0}]},
+    {"seq":2,"t":0.1,"tracks":[]}
+  ],
+  "expect_events": [
+    {"seq":1,"type":"slot_change","track_id":0,"fields":{"slot_id":"A1","prev_state":"unknown","state":"free","coverage":0.4444444477558136}}
+  ]
+}

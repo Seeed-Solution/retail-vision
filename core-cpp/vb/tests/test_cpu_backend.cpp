@@ -178,6 +178,8 @@ int main(int argc, char** argv) {
         if (rc != 0 || !err.empty()) std::fprintf(stderr, "infer: rc=%d err=%s\n", rc, err.c_str());
         CHECK(rc == 0);
         check_same_as_fixture(res.dets, fx);
+        CHECK(res.geom.align == vb::Align::Center);
+        CHECK(res.geom.pad_y > 0.0f);
         CHECK(res.geom.model_w == hw.first && res.geom.model_h == hw.second);
         CHECK(res.preprocess_ms >= 0 && res.inference_ms >= 0 && res.postprocess_ms >= 0);
         std::printf("B: cpu backend on const graph matches fixture "
@@ -188,6 +190,25 @@ int main(int argc, char** argv) {
         vb::FrameBuf f2 = make_frame(320, 240, 8);
         const vb::FrameBuf* two[2] = {&frame, &f2};
         CHECK(ctx->infer(two, 2, 0.25f, 0.5f, &res, err) != 0);
+
+        // backend.align is consumed by the real CPU inference path.
+        vb::Json top_left_json = bj;
+        top_left_json["align"] = "top_left";
+        auto top_left_backend = vb::make_cpu_backend(vb::json_dump(top_left_json), err);
+        CHECK(top_left_backend != nullptr);
+        auto top_left_ctx = top_left_backend->create_context(0, err);
+        CHECK(top_left_ctx != nullptr);
+        vb::DetectionResult top_left_res;
+        CHECK(top_left_ctx->infer(frames, 1, fx.at("score").get<float>(),
+                                  fx.at("nms_iou").get<float>(), &top_left_res, err) == 0);
+        CHECK(top_left_res.geom.align == vb::Align::TopLeft);
+        CHECK(top_left_res.geom.pad_y == 0.0f);
+        check_same_as_fixture(top_left_res.dets, fx);
+        vb::Json invalid_align = bj;
+        invalid_align["align"] = "diagonal";
+        err.clear();
+        CHECK(vb::make_cpu_backend(vb::json_dump(invalid_align), err) == nullptr);
+        CHECK(err == "backend.align must be center or top_left");
 
         // Bad model path / missing model_path surface as factory errors.
         CHECK(vb::make_cpu_backend("{\"model_path\":\"/nonexistent.onnx\"}", err) == nullptr);

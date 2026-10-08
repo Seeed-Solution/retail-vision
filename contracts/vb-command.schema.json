@@ -21,7 +21,8 @@
         "options": {
           "type": "object",
           "properties": {
-            "max_fps": {"type": "number", "minimum": 0},
+            "max_fps": {"type": "number", "minimum": 0,
+              "description": "finite frames per second; 0 means unlimited"},
             "roi_crop": {
               "oneOf": [
                 {"type": "null"},

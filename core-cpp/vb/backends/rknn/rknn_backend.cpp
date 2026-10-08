@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <fstream>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,7 @@
 #include "mpp_source.h"
 #include "model_sha256.h"
 #include "rknn_backend.h"
+#include "rknn_stage2.h"
 
 #include "vb/decoder.h"
 #include "vb/json.h"
@@ -111,7 +113,7 @@ public:
         }
         double rga_ms = 0, rknn_ms = 0;
         const int rc = hybrid_->infer_nv12_fd(f.dmabuf_fd, f.w, f.h, f.stride,
-                                              &rga_ms, &rknn_ms, err);
+                                              &rga_ms, &rknn_ms, err, f.hstride);
         if (rc != 0) return rc;
 
         const double t_dec0 = now_ms();
@@ -187,6 +189,11 @@ public:
         return 0;
     }
 
+    bool copy_snapshot_rgb(const FrameBuf& frame, std::vector<uint8_t>& pixels,
+                           int& w, int& h, std::string& err) override {
+        return hybrid_->copy_snapshot_rgb(frame, pixels, w, h, err);
+    }
+
 private:
     RknnHybrid* hybrid_;
     Decoder* decoder_;
@@ -237,6 +244,18 @@ public:
                     ? dj->value("type", std::string("yolox"))
                     : "yolox";
             input_ = InputSpec::default_for_decoder(dec_type);
+            if (j.contains("align")) {
+                if (!j.at("align").is_string()) {
+                    err = "backend.align must be center or top_left";
+                    return;
+                }
+                try {
+                    input_.align = align_from_string(j.at("align").get<std::string>());
+                } catch (const std::invalid_argument&) {
+                    err = "backend.align must be center or top_left";
+                    return;
+                }
+            }
             auto ij = j.find("input");
             if (ij != j.end() && ij->is_object()) {
                 if (ij->contains("color_order")) {
@@ -359,6 +378,15 @@ public:
         contexts_.push_back(std::move(hybrid));
         return std::make_unique<RknnContext>(contexts_.back().get(), decoder_.get(),
                                              model_w_, model_h_);
+    }
+
+    std::unique_ptr<Stage2Context> create_stage2(const Stage2Spec& spec,
+                                                 std::string& err) override {
+        if (spec.model_path.empty()) { err = "rknn stage2 requires model_path"; return nullptr; }
+        const uint32_t mask = core_masks_.empty() ? kCore0 : core_masks_[0];
+        auto model = load_rknn_stage2_model(spec, mask, err);
+        if (!model) return nullptr;
+        return make_rknn_stage2_context(model, spec, err);
     }
 
 private:

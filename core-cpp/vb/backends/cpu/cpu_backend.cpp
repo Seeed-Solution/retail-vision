@@ -114,19 +114,36 @@ std::string lower_ascii(std::string s) {
     return s;
 }
 
-// ---- Letterbox + RGB(A/BGR) -> NCHW float preprocessing (plain loops) ----
+int python_round_to_int(float v) {
+    const float f = std::floor(v);
+    const float r = v - f;
+    if (r > 0.5f) return static_cast<int>(f) + 1;
+    if (r < 0.5f) return static_cast<int>(f);
+    return (static_cast<int>(f) % 2 == 0) ? static_cast<int>(f)
+                                           : static_cast<int>(f) + 1;
+}
+
+// ---- Letterbox + source/model colour-order conversion (plain loops) ----
 void preprocess(const FrameBuf& f, const LetterboxGeom& g,
                 const InputSpec& in, std::vector<float>& nchw) {
     const int mw = g.model_w, mh = g.model_h;
-    const int iw0 = static_cast<int>(g.pad_x);            // image region origin
+    const int iw0 = static_cast<int>(g.pad_x);
     const int ih0 = static_cast<int>(g.pad_y);
-    nchw.assign(static_cast<size_t>(mw) * mh * 3, 0.0f);
+    // letterbox_fit uses Python's round() and integer floor division for the
+    // centered pad. Use the same rounded resized rectangle when deciding
+    // whether a model pixel is padding; clamping first would turn padding
+    // into a copy of the nearest source edge.
+    const int iw = python_round_to_int(static_cast<float>(f.w) * g.scale);
+    const int ih = python_round_to_int(static_cast<float>(f.h) * g.scale);
+    const float pad = 114.0f / in.divide;
+    nchw.assign(static_cast<size_t>(mw) * mh * 3, pad);
     float* plane_r = nchw.data();
     float* plane_g = plane_r + static_cast<size_t>(mw) * mh;
     float* plane_b = plane_g + static_cast<size_t>(mw) * mh;
     const int sw = f.w, sh = f.h, stride = f.stride;
     const uint8_t* src = f.host;
     for (int y = 0; y < mh; ++y) {
+        if (y < ih0 || y >= ih0 + ih) continue;
         float sy = (y - ih0 + 0.5f) / g.scale - 0.5f;
         int y0 = static_cast<int>(std::floor(sy));
         float fy = sy - y0;
@@ -134,6 +151,7 @@ void preprocess(const FrameBuf& f, const LetterboxGeom& g,
         if (y0 > sh - 1) { y0 = sh - 1; fy = 0; }
         int y1 = std::min(y0 + 1, sh - 1);
         for (int x = 0; x < mw; ++x) {
+            if (x < iw0 || x >= iw0 + iw) continue;
             float sx = (x - iw0 + 0.5f) / g.scale - 0.5f;
             int x0 = static_cast<int>(std::floor(sx));
             float fx = sx - x0;
@@ -145,19 +163,21 @@ void preprocess(const FrameBuf& f, const LetterboxGeom& g,
             const uint8_t* p10 = src + static_cast<size_t>(y1) * stride + x0 * 3;
             const uint8_t* p11 = src + static_cast<size_t>(y1) * stride + x1 * 3;
             float ch[3];
-            for (int c = 0; c < 3; ++c) {
+            for (int semantic = 0; semantic < 3; ++semantic) {
+                // Convert the source memory order to semantic R/G/B first;
+                // only then arrange the three planes for the model order.
+                const int c = f.fmt == PixFmt::RGB888 ? semantic : 2 - semantic;
                 float v = (p00[c] * (1 - fx) + p01[c] * fx) * (1 - fy) +
                           (p10[c] * (1 - fx) + p11[c] * fx) * fy;
-                ch[c] = v / in.divide;
+                ch[semantic] = v / in.divide;
             }
+            if (in.color_order == ColorOrder::BGR) std::swap(ch[0], ch[2]);
             size_t off = static_cast<size_t>(y) * mw + x;
             plane_r[off] = ch[0];
             plane_g[off] = ch[1];
             plane_b[off] = ch[2];
         }
     }
-    if (in.color_order == ColorOrder::BGR)
-        std::swap_ranges(plane_r, plane_r + static_cast<size_t>(mw) * mh, plane_b);
 }
 
 class CpuBackend;
@@ -215,6 +235,18 @@ public:
                     ? dj->value("type", std::string("yolox"))
                     : "yolox";
             input_ = InputSpec::default_for_decoder(dec_type);
+            if (j.contains("align")) {
+                if (!j.at("align").is_string()) {
+                    err = "backend.align must be center or top_left";
+                    return;
+                }
+                try {
+                    input_.align = align_from_string(j.at("align").get<std::string>());
+                } catch (const std::invalid_argument&) {
+                    err = "backend.align must be center or top_left";
+                    return;
+                }
+            }
             auto ij = j.find("input");
             if (ij != j.end() && ij->is_object()) {
                 if (ij->contains("color_order")) {
@@ -225,7 +257,10 @@ public:
                 }
                 if (ij->contains("divide")) {
                     const double dv = ij->at("divide").get<double>();
-                    if (!(dv > 0.0)) { err = "backend.input.divide must be > 0"; return; }
+                    if (!std::isfinite(dv) || !(dv > 0.0)) {
+                        err = "backend.input.divide must be finite and > 0";
+                        return;
+                    }
                     input_.divide = static_cast<float>(dv);
                 }
             }
@@ -374,12 +409,17 @@ public:
     bool run(const FrameBuf& f, float score, float nms_th, DetectionResult& out,
              std::string& err) {
         double t0 = now_ms();
-        out.geom = LetterboxGeom::fit(f.w, f.h, model_w_, model_h_, Align::Center);
         if (f.mem != Mem::Host || !f.host ||
             (f.fmt != PixFmt::RGB888 && f.fmt != PixFmt::BGR888)) {
             err = "cpu backend requires host RGB888/BGR888 frames";
             return false;
         }
+        if (f.w <= 0 || f.h <= 0 || f.stride <= 0 ||
+            static_cast<size_t>(f.stride) < static_cast<size_t>(f.w) * 3) {
+            err = "cpu backend frame dimensions/stride invalid";
+            return false;
+        }
+        out.geom = LetterboxGeom::fit(f.w, f.h, model_w_, model_h_, input_.align);
         std::vector<float> nchw;
         preprocess(f, out.geom, input_, nchw);
         double t1 = now_ms();
@@ -613,6 +653,11 @@ public:
         return std::make_unique<CpuContext>(this);
     }
 
+    std::unique_ptr<Stage2Context> create_stage2(const Stage2Spec& spec,
+                                                 std::string& err) override {
+        return make_cpu_stage2(spec, err);
+    }
+
 private:
     friend class CpuContext;
 
@@ -655,6 +700,9 @@ int CpuContext::infer(const FrameBuf* const* frames, size_t n, float score, floa
 }
 
 }  // namespace
+
+const OrtApi* cpu_ort_api() { return ort(); }
+OrtEnv* cpu_ort_env(std::string& err) { return ort_env(err); }
 
 std::unique_ptr<Backend> make_cpu_backend(const std::string& backend_json,
                                           std::string& err) {

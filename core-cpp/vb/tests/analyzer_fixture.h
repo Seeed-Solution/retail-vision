@@ -75,6 +75,13 @@ static bool run_frames(Analyzer& a, const Json& j, const vb::LetterboxGeom& geom
         m.wall_ms = t * 1000.0;
         m.t_mono_s = t;
         m.geom = geom;
+        std::vector<vb::Stage2Read> reads;
+        for (const auto& r : f.value("reads", Json::array())) {
+            vb::Stage2Read x; x.track_id=r.at("track_id").get<uint32_t>(); x.text=r.at("text").get<std::string>();
+            x.mean_conf=r.value("mean_conf",0.0f); x.min_char_conf=r.value("min_char_conf",0.0f); x.seq=r.value("seq",seq);
+            auto b=r.value("bbox",Json::array()); if(b.size()==4) for(int i=0;i<4;++i)x.bbox[i]=b[i].get<float>(); reads.push_back(std::move(x));
+        }
+        m.reads = &reads;
         std::vector<Track> tracks;
         for (const auto& tj : f.value("tracks", Json::array())) {
             Track tr;
@@ -196,6 +203,7 @@ static Result run_analyzer_fixture(Analyzer& a, const Json& j) {
     const Json cfg = j.value("config", Json::object());
     const Json ece = j.value("expect_configure_error", Json());
     std::string err;
+    a.set_stage2_available(j.value("stage2_available", false));
     bool ok = a.configure(cfg.dump(), err);
     if (!ece.is_null()) {
         std::string want = ece.get<std::string>();
