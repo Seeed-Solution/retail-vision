@@ -114,7 +114,7 @@ public:
         p->core_mask_ = core_mask;
         // rknn_dup_context shares the loaded network from this base context.
         // RKNN 2.3.2 rejects RKNN_FLAG_SHARE_WEIGHT_MEM without an init
-        // extension on the measured radxa runtime, so leave init flags zero
+        // extension on the measured <rk3588-board> runtime, so leave init flags zero
         // and let the documented duplicate API perform the sharing.
         const int rc = rknn_init(&p->base_, bytes.data(), static_cast<uint32_t>(bytes.size()),
                                  0, nullptr);

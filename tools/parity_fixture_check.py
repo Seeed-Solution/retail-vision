@@ -9,7 +9,7 @@ consumer drops frames, so each side must have logged exactly N lines (N is
 printed by parity_feed.sh as PARITY_FRAMES=<N>).
 
 Line counts alone CANNOT detect a *content phase* shift: a consumer that
-silently drops the first payload frame (measured on radxa gst_source float
+silently drops the first payload frame (measured on <rk3588-board> gst_source float
 consumers, 2026-10) still logs N lines, but its line i is the reference line
 i+1's frame — every downstream line-paired comparison is poisoned by +1.
 

@@ -176,7 +176,7 @@ def test_phase_pattern_allows_cross_model_count_divergence(tmp_path):
 
 
 def test_phase_shift_by_one_fails_with_offset(tmp_path):
-    # The measured radxa bug: float consumer drops payload frame 0, its
+    # The measured <rk3588-board> bug: float consumer drops payload frame 0, its
     # sequence is the correct one left-shifted by 1; line counts still match.
     ref = write_counts(tmp_path / "a.jsonl", ODD_EMPTY)
     got = write_counts(tmp_path / "b.jsonl", ODD_EMPTY[1:] + [3])

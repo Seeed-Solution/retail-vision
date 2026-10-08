@@ -25,7 +25,7 @@
    }
   }
  ],
- "description": "BASE-1 parity frame-alignment fixture, CPU reference side (spark). Mirrors parity-cpu-ref.json but points at the fixture mediamtx instance (port 18664) and raises open_timeout_s to 120 so the consumer survives the fixture's reader-join window before the payload starts.",
+ "description": "BASE-1 parity frame-alignment fixture, CPU reference side (<dev-host>). Mirrors parity-cpu-ref.json but points at the fixture mediamtx instance (port 18664) and raises open_timeout_s to 120 so the consumer survives the fixture's reader-join window before the payload starts.",
  "backend": {
   "name": "cpu",
   "model_path": "/models/yolox_tiny.onnx",

@@ -25,7 +25,7 @@
    }
   }
  ],
- "description": "BASE-1 parity frame-alignment fixture, platform side (radxa RK3588). Mirrors parity-rk-rad.json but points at the fixture mediamtx instance (port 18664, hosted on spark) and raises open_timeout_s to 120 so the consumer survives the fixture's reader-join window before the payload starts.",
+ "description": "BASE-1 parity frame-alignment fixture, platform side (<rk3588-board> RK3588). Mirrors parity-rk-rad.json but points at the fixture mediamtx instance (port 18664, hosted on <dev-host>) and raises open_timeout_s to 120 so the consumer survives the fixture's reader-join window before the payload starts.",
  "backend": {
   "name": "rknn",
   "model_path": "/models/yolox_tiny_bgr255.rk3588.rknn",

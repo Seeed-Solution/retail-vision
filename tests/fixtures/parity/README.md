@@ -42,8 +42,8 @@ open，从而从 F1 开始完整采集。
 ## 运行协议（顺序很重要）
 
 1. **先启动消费者**（它们会持续重试 open）：
-   - spark：`vb-runtime --config tools/fixtures/parity/parity-fixture-cpu-ref.json --parity <cpu_dir> --frames <N>`
-   - radxa：`vb-runtime --config tools/fixtures/parity/parity-fixture-rk-rad.json --parity <rk_dir> --frames <N>`
+   - <dev-host>：`vb-runtime --config tools/fixtures/parity/parity-fixture-cpu-ref.json --parity <cpu_dir> --frames <N>`
+   - <rk3588-board>：`vb-runtime --config tools/fixtures/parity/parity-fixture-rk-rad.json --parity <rk_dir> --frames <N>`
 2. 运行 `tools/parity_feed.sh <clip> --fps 5 --readers 2`。
    脚本打印 `CONSUMERS_NOW` 表示 path 已 ready（若消费者尚未启动，此时启动
    也来得及，但预启动更稳）。
@@ -71,7 +71,7 @@ open，从而从 F1 开始完整采集。
 
 ## 内容相位校验（--expect-pattern）
 
-**为什么行数不够**（实测，2026-10 radxa）：float（gst_source）消费者稳定丢失
+**为什么行数不够**（实测，2026-10 <rk3588-board>）：float（gst_source）消费者稳定丢失
 payload 第 0 帧，其 22 行序列 = 正确序列左移 1 帧——行数仍是 N，旧行数校验依然报
 ALIGNED，导致下游逐行配对全部带 +1 相位污染。parity.jsonl 每行只有 detections，
 无帧指纹，所以相位证据由夹具发布端制造：
@@ -122,7 +122,7 @@ ALIGNED，导致下游逐行配对全部带 +1 相位污染。parity.jsonl 每�
 
 - 不要再用 `-stream_loop -1` 的连续循环源做量化 parity 判定（对照实验实测：
   两个同机消费者起始帧错 7s 时 `vb_parity_compare.py` 18/22 帧 FAIL、exit 1）。
-- 不要动 spark 上既有的 `:8664` mediamtx 实例与 `$WORK_DIR/config/*` 既有文件；
+- 不要动 <dev-host> 上既有的 `:8664` mediamtx 实例与 `$WORK_DIR/config/*` 既有文件；
   夹具用自己的端口（默认 RTSP 18664 / API 19970，TCP only）和
   `tools/fixtures/parity/` 下的 config。
 
@@ -137,7 +137,7 @@ ALIGNED，导致下游逐行配对全部带 +1 相位污染。parity.jsonl 每�
 
 ## 已知残余问题 / 后续
 
-- **radxa 侧本轮未完成端到端验收**：radxa 上的 `vb-base-rk:m21` 容器消费者
+- **<rk3588-board> 侧本轮未完成端到端验收**：<rk3588-board> 上的 `vb-base-rk:m21` 容器消费者
   （MPP 源）对任何 RTSP 源（包括旧 loop 源与夹具源）都采集 0 帧且不打印任何
   open 错误——与夹具无关，属设备侧环境回退（上一轮 M2.1 的镜像/环境曾被验收
   过）。宿主 gst-launch 直连夹具 path 是正常的（能 attach），说明网络与

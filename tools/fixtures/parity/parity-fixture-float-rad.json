@@ -25,7 +25,7 @@
    }
   }
  ],
- "description": "BASE-1 parity frame-alignment fixture, float-on-device cross-check side (radxa, CPU backend with the float ONNX model). Mirrors the RK fixture config but runs the float reference on the device itself; gate 2 (--faithfulness) compares this run against the RK run on the same fixture canvas.",
+ "description": "BASE-1 parity frame-alignment fixture, float-on-device cross-check side (<rk3588-board>, CPU backend with the float ONNX model). Mirrors the RK fixture config but runs the float reference on the device itself; gate 2 (--faithfulness) compares this run against the RK run on the same fixture canvas.",
  "backend": {
   "name": "cpu",
   "model_path": "/models/yolox_tiny.onnx",
