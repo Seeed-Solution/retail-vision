@@ -1,0 +1,9 @@
+TensorRT backend source attribution
+
+This directory contains code adapted from the fall-detection project at
+revision 5af128d (NVDEC source and TensorRT sampler structure). The adapted
+code is distributed under the Apache License, Version 2.0. The adaptation
+uses this repository's FrameBuf, TensorView, decoder, and shared geometry
+interfaces; it does not include the upstream application's business logic.
+
+Apache License 2.0 text: https://www.apache.org/licenses/LICENSE-2.0
