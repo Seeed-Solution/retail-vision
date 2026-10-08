@@ -8,6 +8,7 @@
 //     socket: the flags must describe the credentials actually written.
 #include <chrono>
 #include <cstdint>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -555,6 +556,138 @@ struct Loopback {
     }
 };
 
+uint16_t publish_pid(const std::string& body) {
+    CHECK(body.size() >= 2);
+    const size_t n = (size_t(uint8_t(body[0])) << 8) | uint8_t(body[1]);
+    CHECK(body.size() >= 2 + n + 2);
+    return static_cast<uint16_t>((uint8_t(body[2 + n]) << 8) |
+                                 uint8_t(body[3 + n]));
+}
+
+void ack_pid(Loopback& lb, uint16_t pid, bool split = false) {
+    std::string ack{"\x40\x02", 2};
+    ack.push_back(static_cast<char>(pid >> 8));
+    ack.push_back(static_cast<char>(pid & 0xff));
+    if (!split) { lb.send(ack); return; }
+    lb.send(ack.substr(0, 1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    lb.send(ack.substr(1));
+}
+
+void broker_handshake(Loopback& lb, vb::MqttLite& mqtt) {
+    CHECK(lb.accept_one(now_s() + 5.0));
+    uint8_t type = 0;
+    std::string body;
+    CHECK(lb.read_packet(now_s() + 5.0, type, body));
+    CHECK(type == 1);
+    lb.send(std::string("\x20\x02\x00\x00", 4));
+}
+
+void ack_online(Loopback& lb) {
+    uint8_t type = 0;
+    std::string body;
+    CHECK(lb.read_packet(now_s() + 5.0, type, body));
+    CHECK(type == 3);
+    ack_pid(lb, publish_pid(body));
+}
+
+void test_confirmed_puback_and_drop_notifications() {
+    Loopback lb;
+    CHECK(lb.start());
+    vb::MqttConfig cfg;
+    cfg.host = "127.0.0.1"; cfg.port = lb.port; cfg.client_id = "vb-confirmed";
+    cfg.topic_root = "R"; cfg.keepalive_s = 30.0;
+    vb::MqttLite mqtt(cfg);
+    std::string err;
+    CHECK(mqtt.start(err));
+    broker_handshake(lb, mqtt);
+    ack_online(lb);
+
+    std::atomic<int> ok{0}, failed{0};
+    mqtt.publish_confirmed("events/one", "payload", false,
+        [&](bool confirmed) { if (confirmed) ++ok; else ++failed; throw 1; });
+    uint8_t type = 0; std::string body;
+    CHECK(lb.read_packet(now_s() + 5.0, type, body));
+    CHECK(type == 3);
+    const uint16_t pid = publish_pid(body);
+    ack_pid(lb, pid, true);
+    const double deadline = now_s() + 2.0;
+    while (ok.load() != 1 && now_s() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK(ok.load() == 1 && failed.load() == 0);
+    // Unknown and duplicate PUBACKs do not produce another notification.
+    ack_pid(lb, static_cast<uint16_t>(pid + 1));
+    ack_pid(lb, pid);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK(ok.load() == 1 && failed.load() == 0);
+    mqtt.stop();
+    lb.stop();
+
+    vb::MqttLite offline(cfg);
+    int evicted = 0, stopped = 0;
+    for (size_t i = 0; i < vb::MqttLite::kQueueLimit + 1; ++i) {
+        offline.publish_confirmed("events/drop", std::to_string(i), false,
+            [&](bool confirmed) { if (confirmed) ++evicted; else ++stopped; });
+    }
+    CHECK(evicted == 0 && stopped == 1);
+    offline.stop();
+    CHECK(stopped == static_cast<int>(vb::MqttLite::kQueueLimit + 1));
+}
+
+void test_confirmed_reconnect_ack() {
+    Loopback lb;
+    CHECK(lb.start());
+    vb::MqttConfig cfg;
+    cfg.host = "127.0.0.1"; cfg.port = lb.port; cfg.client_id = "vb-reconnect";
+    cfg.topic_root = "R"; cfg.keepalive_s = 30.0;
+    cfg.reconnect_min_s = 0.05; cfg.reconnect_max_s = 0.05;
+    vb::MqttLite mqtt(cfg);
+    std::string err;
+    CHECK(mqtt.start(err));
+    broker_handshake(lb, mqtt);
+    ack_online(lb);
+    std::atomic<int> ok{0}, failed{0};
+    mqtt.publish_confirmed("events/reconnect", "payload", false,
+        [&](bool confirmed) { if (confirmed) ++ok; else ++failed; });
+    uint8_t type = 0; std::string body;
+    CHECK(lb.read_packet(now_s() + 5.0, type, body));
+    CHECK(type == 3);
+    ::close(lb.conn); lb.conn = -1;
+    CHECK(lb.accept_one(now_s() + 8.0));
+    CHECK(lb.read_packet(now_s() + 5.0, type, body));
+    CHECK(type == 1);
+    lb.send(std::string("\x20\x02\x00\x00", 4));
+    ack_online(lb);
+    CHECK(lb.read_packet(now_s() + 8.0, type, body));
+    CHECK(type == 3);
+    ack_pid(lb, publish_pid(body));
+    const double deadline = now_s() + 2.0;
+    while (ok.load() != 1 && now_s() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK(ok.load() == 1 && failed.load() == 0);
+
+    // A second disconnect after the one permitted resend reports failure once.
+    mqtt.publish_confirmed("events/exhaust", "payload", false,
+        [&](bool confirmed) { if (confirmed) ++ok; else ++failed; });
+    CHECK(lb.read_packet(now_s() + 5.0, type, body));
+    CHECK(type == 3);
+    ::close(lb.conn); lb.conn = -1;
+    CHECK(lb.accept_one(now_s() + 8.0));
+    CHECK(lb.read_packet(now_s() + 5.0, type, body));
+    CHECK(type == 1);
+    lb.send(std::string("\x20\x02\x00\x00", 4));
+    ack_online(lb);
+    CHECK(lb.read_packet(now_s() + 8.0, type, body));
+    CHECK(type == 3);
+    ::close(lb.conn); lb.conn = -1;
+    const double failed_deadline = now_s() + 3.0;
+    while (failed.load() != 1 && now_s() < failed_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK(failed.load() == 1 && ok.load() == 1);
+    mqtt.stop();
+    lb.stop();
+}
+
 // Runs one CONNECT exchange against a loopback listener.
 ConnectInfo connect_case(const char* username, const char* password,
                          double keepalive_s = 30.0) {
@@ -672,6 +805,8 @@ int main() {
     test_connect_flags_follow_credentials();
     test_password_without_username_rejected();
     test_keepalive_below_one_rejected();
+    test_confirmed_puback_and_drop_notifications();
+    test_confirmed_reconnect_ack();
     std::fprintf(stderr, "test_out: all checks passed\n");
     return 0;
 }

@@ -26,6 +26,7 @@
 #include <cstddef>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -51,6 +52,7 @@ struct MqttConfig {
 
 class MqttLite {
 public:
+    using DeliveryCallback = std::function<void(bool confirmed)>;
     explicit MqttLite(MqttConfig cfg);
     ~MqttLite();
 
@@ -64,6 +66,14 @@ public:
     // topic is the suffix after <topic_root>/ (e.g. "events/cam-a").
     void publish(const std::string& topic_suffix, const std::string& payload,
                  int qos, bool retain);
+
+    // QoS1 publish with one asynchronous terminal notification. The callback
+    // receives true only for the matching PUBACK; false means the message was
+    // evicted, could not be sent, exhausted its retry, or was dropped at stop.
+    // The callback is never invoked while mu_ is held. Returns a local token.
+    uint64_t publish_confirmed(const std::string& topic_suffix,
+                               const std::string& payload, bool retain,
+                               DeliveryCallback callback);
 
     uint64_t dropped() const { return dropped_.load(std::memory_order_relaxed); }
     bool connected() const { return connected_.load(std::memory_order_relaxed); }
@@ -92,6 +102,8 @@ private:
         int qos = 0;
         bool retain = false;
         bool retried = false;  // resent once after a PUBACK timeout -> drop on next failure
+        DeliveryCallback callback;
+        uint64_t token = 0;
     };
 
     void run();
@@ -106,7 +118,10 @@ private:
     bool take_and_publish(double now_s);
     bool publish_now(const Msg& m);
     void push_front_bounded(const Msg& m);  // requeue with the 1024 cap applied
-    void evict_oldest_locked();             // caller holds mu_: drop + count
+    DeliveryCallback evict_oldest_locked(); // caller holds mu_: drop + count
+    static void notify(DeliveryCallback callback, bool confirmed);
+    void fail_queued();
+    void fail_inflight();
     // Full write loop; false on error or deadline.
     bool io_write(const char* p, size_t n, double deadline_s);
     // Non-blocking read of everything available into rxbuf_.
@@ -141,9 +156,13 @@ private:
     std::atomic<uint64_t> dropped_{0};
     std::atomic<uint64_t> reconnects_{0};
     std::atomic<bool> connected_{false};
+    uint64_t next_token_ = 1;
     // Guards fd_ lifetime against wake_io(): the close and the shutdown(2) run
     // under the same lock so stop() can never signal a recycled descriptor.
     std::mutex fd_mu_;
+    // Serialize stop() callers so only one caller joins and drains terminal
+    // delivery callbacks at a time.
+    std::mutex stop_mu_;
     int wake_fd_ = -1;
 };
 
