@@ -9,6 +9,11 @@
 [![Rockchip](https://img.shields.io/badge/RK3588%20%7C%20RK3576-verified-success)](#verified-on-hardware)
 [![reCamera](https://img.shields.io/badge/reCamera%20SG2002-verified-success)](#verified-on-hardware)
 
+> [!TIP]
+> **Looking for Pre-Configured Commercial Hardware & Starter Kits?**  
+> This footfall analytics pipeline is verified and benchmarked on Seeed Studio reComputer and reCamera hardware.  
+> 🛒 **[Get the Ready-to-Deploy Edge AI Kit](https://www.seeedstudio.com/reComputer-Industrial-J4012-p-5586.html?utm_source=github&utm_medium=readme&utm_campaign=retail_vision&utm_content=hero_banner)** | 📖 **[Explore Smart Retail Solution & Heatmap Configurator](https://www.seeed.cc/solutions/smart-retail-store?utm_source=github&utm_medium=readme&utm_campaign=retail_vision&utm_content=hero_banner)**
+
 ![Dashboard demo](docs/dashboard-demo.gif)
 
 ## What is this
@@ -63,13 +68,13 @@ if it runs on a different machine.
 Every row is a real board watching a live RTSP source, with its MQTT output checked
 by `contracts/validate_payload.py`. **Zero invalid messages on all four.**
 
-| Board | Accelerator | Pipeline | Inference | MQTT | Image |
+| Board | Accelerator | Pipeline | Inference | MQTT | Buy Sample / Kit |
 |---|---|---|---|---|---|
-| reComputer RK3588 | RKNPU v2 | 13.2 fps | 57 ms | 1.00 msg/s | 194 MB |
-| reComputer RK3576 | RKNPU | 13.3 fps | 53 ms | 1.00 msg/s | 194 MB |
-| Raspberry Pi 5 + Hailo-8 | Hailo-8 | 15.7 fps | **6.4 ms** | 0.95 msg/s | 370 MB |
-| Jetson AGX Orin | TensorRT 10.3 | 15.0 fps | 12.2 ms | 0.99 msg/s | 233 MB |
-| reCamera 2002 | CV181x TPU | 10.0 fps | 49 ms | configurable | on-device app |
+| **reComputer RK3588** | RKNPU v2 | 13.2 fps | 57 ms | 1.00 msg/s | [🛒 Buy Now](https://www.seeedstudio.com/reComputer-RK3588-30-p-6817.html?utm_source=github&utm_medium=readme&utm_campaign=retail_vision&utm_content=hw_table) |
+| **reComputer RK3576** | RKNPU | 13.3 fps | 53 ms | 1.00 msg/s | [🛒 Buy Now](https://www.seeedstudio.com/reComputer-RK3576-p-6202.html?utm_source=github&utm_medium=readme&utm_campaign=retail_vision&utm_content=hw_table) |
+| **Raspberry Pi 5 + Hailo-8** | Hailo-8 | 15.7 fps | **6.4 ms** | 0.95 msg/s | [🛒 Buy Now](https://www.seeedstudio.com/Raspberry-Pi-AI-Kit-p-5895.html?utm_source=github&utm_medium=readme&utm_campaign=retail_vision&utm_content=hw_table) |
+| **reComputer Industrial J4012** | TensorRT 10.3 | 15.0 fps | 12.2 ms | 0.99 msg/s | [🛒 Buy Now](https://www.seeedstudio.com/reComputer-Industrial-J4012-p-5586.html?utm_source=github&utm_medium=readme&utm_campaign=retail_vision&utm_content=hw_table) |
+| **reCamera 2002** | CV181x TPU | 10.0 fps | 49 ms | configurable | [🛒 Buy Now](https://www.seeedstudio.com/reCamera-2002-64GB-p-6252.html?utm_source=github&utm_medium=readme&utm_campaign=retail_vision&utm_content=hw_table) |
 
 Pipeline rates are source-limited: the Hailo pipeline reaches 234 fps unpaced and
 the Jetson detector 81.8 fps, roughly 15x and 5x the camera's frame rate.
@@ -262,6 +267,16 @@ cd boards/rpi5-hailo && docker compose build retail-vision
 c++ -std=c++17 -Icore-cpp tools/core_selftest.cpp core-cpp/*.cpp -o /tmp/t && /tmp/t
 cd core-py && python -m pytest retail_core/tests -q
 ```
+
+## 💼 Enterprise & Commercial Deployment
+
+Need to deploy retail footfall heatmaps and customer journey analytics across multiple retail stores or shopping malls?
+
+- **Volume Hardware Pricing**: Tiered pricing available for regional rollouts and 50+ store locations.
+- **ODM / OEM Customization**: Custom enclosure branding, pre-flashed golden firmware, multi-camera PoE switch integration, and global certifications (CE/FCC/RoHS).
+- **ERP & BI Integration**: Turnkey bridging to PowerBI, Tableau, SAP, and custom retail POS/ERP systems via standard MQTT/InfluxDB APIs.
+
+👉 **[Contact Seeed Enterprise Solution Team](https://www.seeed.cc/customization?utm_source=github&utm_medium=readme&utm_campaign=retail_vision&utm_content=footer_enterprise)** or explore the [Smart Retail Store Solution Page](https://www.seeed.cc/solutions/smart-retail-store?utm_source=github&utm_medium=readme&utm_campaign=retail_vision&utm_content=footer_solution).
 
 ## Acknowledgements
 
