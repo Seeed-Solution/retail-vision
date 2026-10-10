@@ -455,7 +455,9 @@ def test_publish_worker_unserializable_payload_does_not_kill_thread(broker, clie
     m = broker.wait_publish("w/good")
     assert m is not None and json.loads(m["payload"]) == {"ok": True}
     assert w.stats()["failed"] == 1
-    assert w.stats()["queued"] == 0
+    # The broker can see the message before _send() returns and the worker
+    # pops the head, so wait for the pop rather than reading it once.
+    wait_until(lambda: w.stats()["queued"] == 0, timeout_s=2.0, msg="queue drained")
     assert broker.wait_publish("w/bad", timeout_s=0.2) is None
     assert w.is_alive()
     w.close()

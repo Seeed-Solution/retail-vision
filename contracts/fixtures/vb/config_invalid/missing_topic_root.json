@@ -8,7 +8,7 @@
       416,
       416
     ],
-    "align": "top_left",
+    "align": "center",
     "score_threshold": 0.3,
     "nms_threshold": 0.45,
     "options": {}

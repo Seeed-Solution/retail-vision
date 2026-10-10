@@ -317,8 +317,18 @@ def _validate(data: dict, *, partial: bool = False, allow_dev: bool = False) -> 
         _err("backend.input_size", "must be two positive integers [w, h]")
     if backend.get("align", "center") not in ("center", "top_left"):
         _err("backend.align", "must be 'center' or 'top_left'")
+    # The keys below stay in the vb.config/1 surface, but this vb-runtime
+    # implements only one value: every backend letterboxes with Align::Center
+    # and the inference pool runs NMS at a fixed 0.45. Reject anything else
+    # instead of silently running with a different setting.
+    if backend.get("align", "center") != "center":
+        _err("backend.align", f"{backend['align']!r} is not supported by this "
+             "vb-runtime (only 'center')")
     _check_threshold(backend.get("score_threshold", 0.35), "backend.score_threshold")
     _check_threshold(backend.get("nms_threshold", 0.45), "backend.nms_threshold")
+    if float(backend.get("nms_threshold", 0.45)) != 0.45:
+        _err("backend.nms_threshold", f"{backend['nms_threshold']!r} is not "
+             "supported by this vb-runtime (only 0.45)")
     if not isinstance(backend.get("options", {}), dict):
         _err("backend.options", "must be an object")
 
@@ -345,6 +355,10 @@ def _validate(data: dict, *, partial: bool = False, allow_dev: bool = False) -> 
     _check_int(native["snapshot_ring"], "native.snapshot_ring", minimum=1)
     q = native["jpeg_quality"]
     _check_int(q, "native.jpeg_quality", minimum=1)
+    # vb-runtime encodes snapshots at a fixed quality of 85.
+    if 1 <= q <= 100 and q != 85:
+        _err("native.jpeg_quality", f"{q!r} is not supported by this "
+             "vb-runtime (only 85)")
     if q > 100:
         _err("native.jpeg_quality", "must be <= 100")
 

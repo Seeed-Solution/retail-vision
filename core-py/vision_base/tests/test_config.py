@@ -137,6 +137,33 @@ def test_builtin_analyzers_match_native_create_analyzer():
     native = set(re.findall(r'name == "([a-z_]+)"', body))
     assert native == set(BUILTIN_ANALYZERS)
 
+
+@pytest.mark.parametrize("section,key,value,expected", [
+    ("backend", "align", "top_left", "'top_left' is not supported by this vb-runtime (only 'center')"),
+    ("backend", "nms_threshold", 0.5, "0.5 is not supported by this vb-runtime (only 0.45)"),
+    ("native", "jpeg_quality", 90, "90 is not supported by this vb-runtime (only 85)"),
+])
+def test_unsupported_non_default_value_is_rejected(tmp_path, section, key, value, expected):
+    raw = json.loads((FIXTURES / "config_valid/full.json").read_text())
+    raw.setdefault(section, {})[key] = value
+    jsonschema.validate(instance=raw, schema=SCHEMA)   # valid vb.config/1 ...
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ConfigError) as ei:              # ... but not runnable here
+        load(str(path))
+    assert str(ei.value) == f"{section}.{key}: {expected}"
+
+
+@pytest.mark.parametrize("section,key,value", [
+    ("backend", "align", "center"), ("backend", "nms_threshold", 0.45),
+    ("native", "jpeg_quality", 85)])
+def test_supported_default_value_is_accepted(tmp_path, section, key, value):
+    raw = json.loads((FIXTURES / "config_valid/full.json").read_text())
+    raw.setdefault(section, {})[key] = value
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw))
+    load(str(path))
+
 def test_runtime_config_uses_custom_open_timeout(tmp_path):
     raw = json.loads((FIXTURES / "config_valid" / "full.json").read_text())
     raw["runtime"]["open_timeout_s"] = 12.0
