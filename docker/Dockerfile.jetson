@@ -35,6 +35,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=deps /pydeps /pydeps
 WORKDIR /opt/retail-vision
+COPY core-py/vision_base ./vision_base
 COPY core-py/retail_core ./retail_core
 COPY backends/__init__.py ./backends/__init__.py
 COPY backends/tensorrt ./backends/tensorrt
