@@ -81,3 +81,28 @@ def test_aspect_fit_rejects_non_positive():
     for args in ((0, 10, 640), (10, 0, 640), (10, 10, 0), (-1, 10, 640)):
         with pytest.raises(ValueError):
             aspect_fit_geometry(*args)
+
+
+def test_vision_base_letterbox_cross_check():
+    """Why the two letterbox helpers are not replaced by vision_base.letterbox.
+
+    aspect_fit_geometry agrees with letterbox.fit on scale and padding for
+    every grid input, but fit() does not return the scaled size the video
+    sources need, so a wrapper would recompute round(src * scale) anyway.
+    letterbox_correction uses the unrounded fit while vision_base rounds the
+    resized image to whole pixels, so mapped coordinates differ for
+    non-integral scales; the strict wire contract keeps the retail formula.
+    """
+    from vision_base.letterbox import fit, to_source_norm
+
+    for fw, fh, size, (sw, sh, px, py) in compute()["aspect_fit_geometry"]:
+        geom = fit(fw, fh, size, size)
+        assert (geom.pad_x, geom.pad_y) == (px, py)
+        assert (round(fw * geom.scale), round(fh * geom.scale)) == (sw, sh)
+
+    differs = 0
+    for fw, fh, mw, mh, (sx, sy, ox, oy) in compute()["letterbox_correction"]:
+        geom = fit(fw, fh, mw, mh)
+        vx, vy = to_source_norm(geom, 0.25, 0.75)
+        differs += (vx, vy) != ((0.25 - ox) / sx, (0.75 - oy) / sy)
+    assert differs > 0

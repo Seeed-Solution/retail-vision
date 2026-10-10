@@ -9,7 +9,12 @@ from .dwell import STATE_NAMES
 
 
 def letterbox_correction(frame_width, frame_height, model_width, model_height):
-    """Scale/offset that maps model-normalized coords back to display-normalized."""
+    """Scale/offset that maps model-normalized coords back to display-normalized.
+
+    Kept instead of vision_base.letterbox: this uses the unrounded fit, the
+    base rounds the resized image to whole pixels, and the published
+    coordinates must stay byte-identical (tests/test_math_golden.py).
+    """
     display_aspect = frame_width / frame_height
     model_aspect = model_width / model_height
     scale_x = scale_y = 1.0
