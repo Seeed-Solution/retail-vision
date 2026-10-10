@@ -1,0 +1,44 @@
+{
+ "timestamp": 1760001021600,
+ "frame_id": 324,
+ "frame_width": 1920,
+ "frame_height": 1080,
+ "fps": 15.0,
+ "inference_time_ms": 11.1,
+ "zone": {
+  "occupancy_count": 1,
+  "browsing_count": 0,
+  "engaged_count": 0,
+  "assist_count": 1,
+  "peak_customer": 1,
+  "avg_dwell_time": 0.0,
+  "avg_engagement_time": 0.0,
+  "avg_velocity": 0.24,
+  "entry_count": 2,
+  "exit_count": 0
+ },
+ "persons": [
+  {
+   "slot": 0,
+   "track_id": 0,
+   "state": "assistance",
+   "cx_pct": 65.0,
+   "cy_pct": 58.9,
+   "dwell_duration": 21.2,
+   "confidence": 0.85,
+   "bbox": {
+    "x": 0.57,
+    "y": 0.0022,
+    "w": 0.16,
+    "h": 1.1733
+   },
+   "velocity": {
+    "vx": 0.0,
+    "vy": 0.0,
+    "speed_m_s": 0.0
+   }
+  }
+ ],
+ "camera_id": "cam-b",
+ "source_backend": "golden_stub"
+}
