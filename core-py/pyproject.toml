@@ -1,0 +1,27 @@
+# The `vision-base` distribution: the vision_base orchestration package only.
+# Versioned separately from the repository; release tags are
+# vision-base-vMAJOR.MINOR.PATCH and must match vision_base.__version__.
+# The root pyproject.toml (retail-vision) still packages vision_base together
+# with retail_core for development in this repository.
+[project]
+name = "vision-base"
+dynamic = ["version"]
+description = "Python orchestration for the vision base: config, shards, supervisor, MQTT, health"
+readme = { text = "See https://github.com/Seeed-Solution/retail-vision (docs/quickstart.md, docs/extending.md).", content-type = "text/plain" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.urls]
+Source = "https://github.com/Seeed-Solution/retail-vision"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["vision_base"]
+
+[tool.setuptools.dynamic]
+version = { attr = "vision_base.__version__" }

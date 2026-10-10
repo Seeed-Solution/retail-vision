@@ -268,6 +268,21 @@ c++ -std=c++17 -Icore-cpp tools/core_selftest.cpp core-cpp/*.cpp -o /tmp/t && /t
 cd core-py && python -m pytest retail_core/tests -q
 ```
 
+### Installing `vision_base` on its own
+
+`core-py/` is also the `vision-base` distribution: the `vision_base` package only,
+no third-party runtime dependencies, Python 3.10 or newer. It is versioned
+separately from this repository. Releases are tagged `vision-base-vMAJOR.MINOR.PATCH`,
+and the tag matches `vision_base.__version__`.
+
+```bash
+pip install "git+https://github.com/Seeed-Solution/retail-vision@vision-base-v0.1.0#subdirectory=core-py"
+```
+
+The native `vb-runtime` is not part of the package. Its major.minor version must
+match `vision_base` (checked at startup); build it from `core-cpp/vb` or use a
+base image.
+
 ## Acknowledgements
 
 - [Ultralytics](https://github.com/ultralytics/ultralytics) — the YOLO models every
