@@ -22,6 +22,40 @@ FIXTURES = pathlib.Path(__file__).resolve().parents[3] / "contracts" / "fixtures
 SCHEMA_PATH = FIXTURES.parent.parent / "vb-config.schema.json"
 SCHEMA = json.loads(SCHEMA_PATH.read_text())
 
+
+@pytest.mark.parametrize("value", [True, float("nan"), float("inf"), -1.0])
+def test_stream_max_fps_requires_finite_nonnegative_number(tmp_path, value):
+    raw = json.loads((FIXTURES / "config_valid/full.json").read_text())
+    raw["streams"] = [{"stream_id": "cam", "url": "synthetic://0",
+                        "options": {"max_fps": value}}]
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw, allow_nan=True))
+    with pytest.raises(ConfigError, match=r"streams\[0\]\.options\.max_fps"):
+        load(str(path))
+
+
+@pytest.mark.parametrize("roi", [[0.0, 0.0, float("nan"), 1.0],
+                                 [0.0, float("inf"), 1.0, 1.0]])
+def test_stream_roi_crop_requires_finite_coordinates(tmp_path, roi):
+    raw = json.loads((FIXTURES / "config_valid/full.json").read_text())
+    raw["streams"] = [{"stream_id": "cam", "url": "synthetic://0",
+                        "options": {"roi_crop": roi}}]
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw, allow_nan=True))
+    with pytest.raises(ConfigError, match=r"streams\[0\]\.options\.roi_crop"):
+        load(str(path))
+
+
+@pytest.mark.parametrize("options", [None, [], "bad", 1])
+def test_stream_options_must_be_object(tmp_path, options):
+    raw = json.loads((FIXTURES / "config_valid/full.json").read_text())
+    raw["streams"] = [{"stream_id": "cam", "url": "synthetic://0",
+                        "options": options}]
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ConfigError, match=r"streams\[0\]\.options"):
+        load(str(path))
+
 # expected field path per invalid fixture (message must contain it)
 INVALID_EXPECTED_PATH = {
     "missing_required.json": "mqtt.host",
@@ -73,11 +107,23 @@ def test_runtime_config_has_no_streams():
     assert rt["tracker"] == cfg.tracker
     assert rt["analyzers"] == {"plugins": []}
     assert rt["snapshot_ring"] == 2
+    assert rt["open_timeout_s"] == 8.0
     rt1 = runtime_config(cfg, 1)
     assert "streams" not in rt1
     with pytest.raises(ConfigError):
         runtime_config(cfg, -1)
 
+
+
+def test_runtime_config_uses_custom_open_timeout(tmp_path):
+    raw = json.loads((FIXTURES / "config_valid" / "full.json").read_text())
+    raw["runtime"]["open_timeout_s"] = 12.0
+    path = tmp_path / "custom-timeout.json"
+    path.write_text(json.dumps(raw))
+    cfg = load(str(path))
+    rt = runtime_config(cfg, 0)
+    assert rt["open_timeout_s"] == 12.0
+    assert "streams" not in rt
 
 def test_decoder_config_validation():
     """M1.15b: exact spec error strings for classify/ctc."""

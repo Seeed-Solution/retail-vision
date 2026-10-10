@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -158,6 +159,8 @@ def _check_options(options: dict, path: str) -> None:
         _err(path, "must be an object")
     if "max_fps" in options:
         _check_num(options["max_fps"], f"{path}.max_fps", lo=0.0)
+        if not math.isfinite(float(options["max_fps"])):
+            _err(f"{path}.max_fps", "must be finite")
     if "roi_crop" in options:
         roi = options["roi_crop"]
         if roi is not None:
@@ -166,6 +169,8 @@ def _check_options(options: dict, path: str) -> None:
                            for v in roi)):
                 _err(f"{path}.roi_crop", "must be null or [x0, y0, x1, y1] numbers")
             x0, y0, x1, y1 = roi
+            if any(not math.isfinite(float(v)) for v in roi):
+                _err(f"{path}.roi_crop", "coordinates must be finite")
             if not (0 <= x0 < x1 <= 1) or not (0 <= y0 < y1 <= 1):
                 _err(f"{path}.roi_crop", "requires 0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1")
             if x1 - x0 < 0.05 or y1 - y0 < 0.05:
@@ -474,6 +479,7 @@ def runtime_config(cfg: BaseConfig, shard_index: int) -> dict:
         "tracker": copy.deepcopy(cfg.tracker),
         "analyzers": {"plugins": list(cfg.analyzers.get("plugins", []))},
         "snapshot_ring": cfg.native.get("snapshot_ring", 2),
+        "open_timeout_s": cfg.runtime["open_timeout_s"],
     }
     if cfg.dev.get("raw_tensors"):
         # §6.12: the native child reads dev limits (max_fps / max_streams)
