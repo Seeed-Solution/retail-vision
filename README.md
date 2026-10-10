@@ -283,13 +283,29 @@ The native `vb-runtime` is not part of the package. Its major.minor version must
 match `vision_base` (checked at startup); build it from `core-cpp/vb` or use a
 base image.
 
-In this repository the root `retail-vision` package ships `retail_core` only and
-depends on `vision-base`; `uv sync` installs `core-py/` as an editable path source.
-
 0.1.0 does not support a top-level `stage2` block or the decoder key
 `grid_center_activation`; `vision_base.config.load` rejects both. Configs that use
 them (for example edge-parking-vision's plate presets) need their vendored
 `vision_base` copy until a later release adds them.
+
+### Installing `retail-vision` with pip
+
+The root `retail-vision` package ships `retail_core` only. It depends on
+`vision-base` through a direct reference to the `vision-base-v0.1.0` tag, so pip
+fetches both from this repository:
+
+```bash
+# vision_base + retail_core
+pip install "git+https://github.com/Seeed-Solution/retail-vision@<ref>"
+```
+
+`<ref>` is a branch, tag or commit of this repository. The dependency always
+resolves to the `vision-base-v0.1.0` tag, whatever `core-py/` contains at `<ref>`,
+so that tag must exist before this command works. Only `vision_base`: use the
+command in the previous section. Both packages: this command alone is enough.
+
+In this repository, `uv sync` ignores the direct reference and installs `core-py/`
+as an editable path source (`[tool.uv.sources]`), so tests use the working tree.
 
 ## Acknowledgements
 

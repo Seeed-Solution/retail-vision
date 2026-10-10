@@ -3,8 +3,11 @@ name = "retail-vision"
 version = "0.1.0"
 requires-python = ">=3.10"
 # vision_base is owned by the vision-base distribution (core-py/pyproject.toml);
-# this wheel ships retail_core only. Same major.minor as vb-runtime (§6.14).
-dependencies = ["vision-base>=0.1.0,<0.2"]
+# this wheel ships retail_core only. pip resolves vision-base from its release
+# tag (it is not on PyPI); uv uses the [tool.uv.sources] path below instead.
+dependencies = [
+    "vision-base @ git+https://github.com/Seeed-Solution/retail-vision@vision-base-v0.1.0#subdirectory=core-py",
+]
 
 [dependency-groups]
 dev = ["pytest>=8", "jsonschema>=4.17,<5", "onnx>=1.16,<2"]
