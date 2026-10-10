@@ -16,5 +16,5 @@ package-dir = { "" = "core-py" }
 packages = ["vision_base", "retail_core"]
 
 [tool.pytest.ini_options]
-testpaths = ["core-py"]
+testpaths = ["core-py", "tests"]
 markers = ["native: needs VB_RUNTIME_BIN", "broker: needs a real MQTT broker (VB_TEST_BROKER=host:port)"]

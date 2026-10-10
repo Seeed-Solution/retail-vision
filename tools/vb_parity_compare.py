@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import pathlib
 import sys
 
@@ -70,6 +71,50 @@ def load(path: pathlib.Path) -> list[dict]:
 def box(det: dict) -> tuple[float, float, float, float]:
     cx, cy, w, h = det["cx"], det["cy"], det["w"], det["h"]
     return cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2
+
+
+def _finite_number(value: object) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(float(value)))
+
+
+def _validate_detection(det: object, frame_index: int, side: str) -> None:
+    if not isinstance(det, dict):
+        raise ValueError(f"frame {frame_index} {side}: detection must be an object")
+    for key in ("cx", "cy", "w", "h"):
+        if key not in det or not _finite_number(det[key]):
+            raise ValueError(f"frame {frame_index} {side}: bbox {key} must be finite")
+    if float(det["w"]) <= 0 or float(det["h"]) <= 0:
+        raise ValueError(f"frame {frame_index} {side}: bbox width/height must be > 0")
+    if "keypoints" in det and det["keypoints"] is not None:
+        points = det["keypoints"]
+        if not isinstance(points, list):
+            raise ValueError(f"frame {frame_index} {side}: keypoints must be an array")
+        for point in points:
+            if (not isinstance(point, list) or len(point) != 3 or
+                    any(not _finite_number(v) for v in point)):
+                raise ValueError(f"frame {frame_index} {side}: invalid keypoint")
+
+
+def _validate_inputs(ref_frames: list[dict], got_frames: list[dict], iou_th: float,
+                     count_limit: int, kpt_max: float | None) -> None:
+    if not _finite_number(iou_th) or not 0 <= float(iou_th) <= 1:
+        raise ValueError("iou threshold must be finite and in [0, 1]")
+    if not isinstance(count_limit, int) or isinstance(count_limit, bool) or count_limit < 0:
+        raise ValueError("count difference limit must be a nonnegative integer")
+    if kpt_max is not None and (not _finite_number(kpt_max) or float(kpt_max) < 0):
+        raise ValueError("keypoint threshold must be finite and >= 0")
+    if not ref_frames or not got_frames:
+        raise ValueError(f"frame lists must be non-empty (ref {len(ref_frames)}, got {len(got_frames)})")
+    if len(ref_frames) != len(got_frames):
+        raise ValueError(f"frame count differs: ref {len(ref_frames)}, got {len(got_frames)}")
+    for index, (rf, gf) in enumerate(zip(ref_frames, got_frames)):
+        for frame, side in ((rf, "ref"), (gf, "got")):
+            detections = frame.get("detections", []) if isinstance(frame, dict) else None
+            if not isinstance(detections, list):
+                raise ValueError(f"frame {index} {side}: detections must be an array")
+            for det in detections:
+                _validate_detection(det, index, side)
 
 
 def iou(a: dict, b: dict) -> float:
@@ -119,8 +164,10 @@ def kpt_distances(ref: list[dict], got: list[dict]) -> list[float]:
 def compare(ref_frames: list[dict], got_frames: list[dict], iou_th: float,
             count_limit: int, kpt_max: float | None) -> tuple[bool, list[str]]:
     """Returns (pass, report lines). Shared by the file path and --selftest."""
+    _validate_inputs(ref_frames, got_frames, iou_th, count_limit, kpt_max)
     lines: list[str] = []
     failures: list[str] = []
+    global_failures: list[str] = []
     ious: list[float] = []
     kpts: list[float] = []
     worst = (1.0, -1)
@@ -136,11 +183,19 @@ def compare(ref_frames: list[dict], got_frames: list[dict], iou_th: float,
         ious.extend(frame_ious)
         if frame_ious and min(frame_ious) < worst[0]:
             worst = (min(frame_ious), index)
+        problems = []
         frame_kpts: list[float] = []
         for _, r, g in pairs:
+            if kpt_max is not None and (
+                    not isinstance(r.get("keypoints"), list) or
+                    not isinstance(g.get("keypoints"), list) or
+                    len(r["keypoints"]) != len(g["keypoints"]) or
+                    not r["keypoints"]):
+                problems.append("keypoint gate requires matching non-empty keypoint arrays")
             frame_kpts.extend(kpt_distances(r, g))
         kpts.extend(frame_kpts)
-        problems = []
+        if bool(rd) != bool(gd):
+            problems.append("single-sided empty detection frame")
         if diff > count_limit:
             problems.append(f"count ref={len(rd)} got={len(gd)}")
         if unmatched > 0:
@@ -158,6 +213,8 @@ def compare(ref_frames: list[dict], got_frames: list[dict], iou_th: float,
             failures.append(f"frame {index} (seq {rf.get('seq')}): " +
                             "; ".join(problems))
     frames = len(ref_frames)
+    if not ious:
+        global_failures.append("no matched detection pairs in the complete input")
     mean_iou = sum(ious) / len(ious) if ious else float("nan")
     lines.append(
         f"parity_compare: frames={frames} matched_pairs={len(ious)} "
@@ -172,13 +229,16 @@ def compare(ref_frames: list[dict], got_frames: list[dict], iou_th: float,
             f"mean_dist={mean_kpt:.5f} max_dist={max(kpts):.5f}"
             + (f" kpt_gate={kpt_max}" if kpt_max is not None else " (report only)"))
     lines.extend(f"  FAIL {f}" for f in failures[:10])
+    lines.extend(f"  FAIL {f}" for f in global_failures)
     if len(failures) > 10:
         lines.append(f"  ... {len(failures) - 10} more failing frames")
-    if failures:
-        lines.append(f"parity_compare: FAIL ({len(failures)}/{frames} frames)")
+    if failures or global_failures:
+        lines.append(f"parity_compare: FAIL ({len(failures)}/{frames} frames"
+                     + (f"; {len(global_failures)} global check(s)" if global_failures else "")
+                     + ")")
     else:
         lines.append(f"parity_compare: PASS ({frames}/{frames} frames)")
-    return not failures, lines
+    return not failures and not global_failures, lines
 
 
 def selftest() -> int:
@@ -305,8 +365,12 @@ def main() -> int:
               f"got {len(got_frames)}", file=sys.stderr)
         return 2
 
-    ok, lines = compare(ref_frames, got_frames, iou_th, args.count_diff,
-                        args.kpt_max)
+    try:
+        ok, lines = compare(ref_frames, got_frames, iou_th, args.count_diff,
+                            args.kpt_max)
+    except ValueError as exc:
+        print(f"parity_compare: invalid input: {exc}", file=sys.stderr)
+        return 2
     print("\n".join(lines))
     return 0 if ok else 1
 
