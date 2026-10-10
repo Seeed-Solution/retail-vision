@@ -272,6 +272,7 @@ def test_publish_worker_sends_json(broker, client):
     assert m is not None
     assert json.loads(m["payload"]) == {"schema": "vb.ack/1", "ok": True}
     w.close()
+    assert not w.is_alive()
 
 
 def test_topic_matches_unit():
@@ -403,7 +404,7 @@ def test_publish_worker_offline_keeps_head_and_order():
 
     waits = []
     w = PublishWorker(FlakyClient(), queue_size=4)
-    w._stop.wait = lambda t: (waits.append(t), False)[1]
+    w._stop_event.wait = lambda t: (waits.append(t), False)[1]
     w.submit("a", {"i": 1})
     w.submit("b", {"i": 2})
     w.start()
@@ -432,7 +433,7 @@ def test_publish_worker_offline_keeps_head_and_order():
             replaced.append(True)
             w2.submit("c", {"i": 3})  # queue full -> drops current head "a"
         return False
-    w2._stop.wait = wait_and_replace
+    w2._stop_event.wait = wait_and_replace
     w2.submit("a", {"i": 1})
     w2.start()
     deadline = time.time() + 1

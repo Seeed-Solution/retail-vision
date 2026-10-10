@@ -31,7 +31,8 @@ class PublishWorker(threading.Thread):
         self.queue_size = queue_size
         self._q: deque = deque()
         self._cv = threading.Condition()
-        self._stop = threading.Event()
+        # Do not shadow threading.Thread._stop(), which Thread.join() calls.
+        self._stop_event = threading.Event()
         self.dropped = 0
         self.sent = 0
         self.failed = 0
@@ -52,7 +53,7 @@ class PublishWorker(threading.Thread):
                     "sent": self.sent, "failed": self.failed}
 
     def close(self, timeout_s: float = 3.0) -> None:
-        self._stop.set()
+        self._stop_event.set()
         with self._cv:
             self._cv.notify_all()
         self.join(timeout_s)
@@ -88,11 +89,11 @@ class PublishWorker(threading.Thread):
     def run(self) -> None:
         # Consecutive-failure backoff (1, 2, 4 ... <= 30 s), reset on any success.
         backoff_s = 0.0
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             with self._cv:
-                while not self._q and not self._stop.is_set():
+                while not self._q and not self._stop_event.is_set():
                     self._cv.wait(1.0)
-                if self._stop.is_set():
+                if self._stop_event.is_set():
                     break
                 item = self._q[0]
             topic, payload, qos, retain = item
@@ -113,7 +114,7 @@ class PublishWorker(threading.Thread):
             # outage outlived one backoff interval).
             self.failed += 1
             backoff_s = min(30.0, backoff_s * 2) if backoff_s else 1.0
-            if self._stop.wait(backoff_s):
+            if self._stop_event.wait(backoff_s):
                 break
             # `submit` may have evicted this head while we waited (queue full);
             # the loop re-reads `self._q[0]` so the next attempt targets
