@@ -283,6 +283,9 @@ The native `vb-runtime` is not part of the package. Its major.minor version must
 match `vision_base` (checked at startup); build it from `core-cpp/vb` or use a
 base image.
 
+In this repository the root `retail-vision` package ships `retail_core` only and
+depends on `vision-base`; `uv sync` installs `core-py/` as an editable path source.
+
 ## Acknowledgements
 
 - [Ultralytics](https://github.com/ultralytics/ultralytics) — the YOLO models every
