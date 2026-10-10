@@ -1,0 +1,5 @@
+{"schema":"vb.ack/1","timestamp":1790000000500,"session_id":"1790000000000","device_id":"rk3576-demo-01","request_id":"r-1","command":"add_stream","ok":true,"applied":{"stream_id":"cam-02","url":"rtsp://camera.local/s","shard":0,"decode_path":"gpu","score_threshold":0.35,"persisted":true}}
+{"schema":"vb.ack/1","timestamp":1790000001500,"session_id":"1790000000000","device_id":"rk3576-demo-01","request_id":"r-x","command":"add_stream","ok":false,"error":"stream already exists: cam-02"}
+{"schema":"vb.ack/1","timestamp":1790000002500,"session_id":"1790000000000","device_id":"rk3576-demo-01","request_id":"r-3","command":"remove_stream","ok":true,"applied":{"stream_id":"cam-02","removed":true,"persisted":true}}
+{"schema":"vb.ack/1","timestamp":1790000003500,"session_id":"1790000000000","device_id":"rk3576-demo-01","request_id":"r-4","command":"set_threshold","ok":true,"applied":{"stream_id":"cam_03","score_threshold":0.45}}
+{"schema":"vb.ack/1","timestamp":1790000004500,"session_id":"1790000000000","device_id":"rk3576-demo-01","request_id":"r-5","command":"list_streams","ok":true,"applied":{"streams":[]}}

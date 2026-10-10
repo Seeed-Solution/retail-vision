@@ -1,0 +1,6 @@
+{"schema":"vb.command/1","timestamp":1790000000000,"device_id":"rk3576-demo-01","request_id":"r-1","command":"add_stream","params":{"stream_id":"cam-02","url":"rtsp://camera.local/s"}}
+{"schema":"vb.command/1","timestamp":1790000001000,"device_id":"rk3576-demo-01","request_id":"r-2","command":"add_stream","params":{"stream_id":"cam_03","url":"rtsp://camera.local/s2","name":"entrance","transport":"udp","score_threshold":0.5,"options":{"max_fps":5,"roi_crop":[0.1,0.2,0.8,0.9]}}}
+{"schema":"vb.command/1","timestamp":1790000002000,"device_id":"rk3576-demo-01","request_id":"r-3","command":"remove_stream","params":{"stream_id":"cam-02"}}
+{"schema":"vb.command/1","timestamp":1790000003000,"device_id":"rk3576-demo-01","request_id":"r-4","command":"set_threshold","params":{"stream_id":"cam_03","score_threshold":0.45}}
+{"schema":"vb.command/1","timestamp":1790000004000,"device_id":"rk3576-demo-01","request_id":"r-5","command":"list_streams","params":{}}
+{"schema":"vb.command/1","timestamp":1790000005000,"device_id":"rk3576-demo-01","request_id":"r-6","command":"add_stream","params":{"stream_id":"cam-x","url":"rtsp://camera.local/s3","options":{"roi_crop":null,"max_fps":0}}}

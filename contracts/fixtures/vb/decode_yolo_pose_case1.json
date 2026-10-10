@@ -1,0 +1,161 @@
+{
+ "note": "Hand-computed split pose head (spec BASE-1 §6.11 yolo_pose, layout of the RK/Hailo exports): 16x16 canvas, stride 8, reg_max 4, keypoints 2, nc 1. Cell (1,1) is the only one above the score threshold: every direction has a one-hot bin vector [0,20,0,0], so the expected distance is 1 bin = 8 px on each side: x0=y0=(1.5-1)*8=4, x1=y1=(1.5+1)*8=20 -> cx=cy=12 px=(0.75,0.75), w=h=16 px=1.0. cls logit ln4 -> sigmoid 0.8 (the plane range is [-10, ln4], read as logits). Keypoints use the Ultralytics form x=(2*px+gx)*stride, the same cell origin the box path uses (gx+0.5): k0 raw (0.5,0.25,0) -> (1.0,0.75) at 16/12 px, conf sigmoid(0)=0.5; k1 raw (0.25,0.75,ln4) -> (0.75,1.25) at 12/20 px, conf sigmoid(ln4)=0.8. (k1 lands one cell past the canvas, which is fine for a decoder fixture: clipping belongs to the output layer.) Other cells sigmoid(-10)~4.5e-5 < 0.3 dropped.",
+ "decoder": {
+  "type": "yolo_pose",
+  "num_classes": 1,
+  "reg_max": 4,
+  "keypoints": 2,
+  "strides": [
+   8
+  ]
+ },
+ "model_hw": [
+  16,
+  16
+ ],
+ "score": 0.3,
+ "nms": 0.45,
+ "tensors": [
+  {
+   "dims": [
+    16,
+    2,
+    2
+   ],
+   "data": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    20.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    20.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    20.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    20.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "dims": [
+    1,
+    2,
+    2
+   ],
+   "data": [
+    -10.0,
+    -10.0,
+    -10.0,
+    1.3862943611198906
+   ]
+  },
+  {
+   "dims": [
+    6,
+    2,
+    2
+   ],
+   "data": [
+    0.1,
+    0.1,
+    0.1,
+    0.5,
+    0.1,
+    0.1,
+    0.1,
+    0.25,
+    0.1,
+    0.1,
+    0.1,
+    0.0,
+    0.1,
+    0.1,
+    0.1,
+    0.25,
+    0.1,
+    0.1,
+    0.1,
+    0.75,
+    0.1,
+    0.1,
+    0.1,
+    1.3862943611198906
+   ]
+  }
+ ],
+ "expect": [
+  {
+   "cx": 0.75,
+   "cy": 0.75,
+   "w": 1.0,
+   "h": 1.0,
+   "score": 0.8,
+   "class_id": 0,
+   "kpts": [
+    [
+     1.0,
+     0.75,
+     0.5
+    ],
+    [
+     0.75,
+     1.25,
+     0.8
+    ]
+   ]
+  }
+ ]
+}

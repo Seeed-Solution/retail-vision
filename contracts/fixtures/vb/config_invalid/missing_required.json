@@ -1,0 +1,15 @@
+{
+  "schema": "vb.config/1",
+  "device_id": "d-1",
+  "backend": {
+    "name": "cpu",
+    "model_path": "/m.onnx"
+  },
+  "mqtt": {
+    "port": 1883,
+    "topic_root": "vb"
+  },
+  "app": {
+    "module": "a:B"
+  }
+}

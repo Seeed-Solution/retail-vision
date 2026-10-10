@@ -1,0 +1,9 @@
+{"schema":"vb.ack/2","timestamp":1,"session_id":"s","device_id":"d","request_id":"r","command":"add_stream","ok":true,"applied":{}}
+{"schema":"vb.ack/1","session_id":"s","device_id":"d","request_id":"r","command":"add_stream","ok":true,"applied":{}}
+{"schema":"vb.ack/1","timestamp":"x","session_id":"s","device_id":"d","request_id":"r","command":"add_stream","ok":true,"applied":{}}
+{"schema":"vb.ack/1","timestamp":1,"session_id":"s","device_id":"d","request_id":"r","command":"add_stream","ok":false}
+{"schema":"vb.ack/1","timestamp":1,"session_id":"s","device_id":"d","request_id":"r","command":"add_stream","ok":false,"applied":{}}
+{"schema":"vb.ack/1","timestamp":1,"session_id":"s","device_id":"d","request_id":"r","command":"add_stream","ok":true}
+{"schema":"vb.ack/1","timestamp":1,"session_id":"s","device_id":"d","request_id":"r","command":"add_stream","ok":true,"applied":"not-an-object"}
+{"schema":"vb.ack/1","timestamp":1,"session_id":"s","device_id":"d","request_id":"r","ok":true,"applied":{}}
+{"schema":"vb.ack/1","timestamp":1,"session_id":"s","device_id":"d","request_id":"r","command":"add_stream","ok":"yes","applied":{}}

@@ -1,0 +1,133 @@
+{
+ "description": "Generic tracker behaviour fixtures (BASE-1 §6.2, M1.5). Frames are lists of detections [cx, cy, w, h, score, class_id] in model-canvas normalized coords; t = frame_index / fps. 'track_ids' lists the tracks visible this frame (misses == 0), ids start at 1.",
+ "cases": [
+  {
+   "name": "two_objects_stable_ids",
+   "config": {},
+   "fps": 10,
+   "frames": [
+    [[0.3, 0.5, 0.1, 0.1, 0.9, 0], [0.7, 0.5, 0.1, 0.1, 0.9, 0]],
+    [[0.3, 0.5, 0.1, 0.1, 0.9, 0], [0.7, 0.5, 0.1, 0.1, 0.9, 0]],
+    [[0.3, 0.5, 0.1, 0.1, 0.9, 0], [0.7, 0.5, 0.1, 0.1, 0.9, 0]],
+    [[0.3, 0.5, 0.1, 0.1, 0.9, 0], [0.7, 0.5, 0.1, 0.1, 0.9, 0]],
+    [[0.3, 0.5, 0.1, 0.1, 0.9, 0], [0.7, 0.5, 0.1, 0.1, 0.9, 0]]
+   ],
+   "expect": [
+    {"frame": 0, "track_ids": [1, 2]},
+    {"frame": 4, "track_ids": [1, 2]}
+   ]
+  },
+  {
+   "name": "class_aware_true_new_id_on_class_change",
+   "config": {"class_aware": true},
+   "fps": 10,
+   "frames": [
+    [[0.5, 0.5, 0.1, 0.1, 0.9, 0]],
+    [[0.5, 0.5, 0.1, 0.1, 0.9, 1]],
+    [[0.5, 0.5, 0.1, 0.1, 0.9, 0]]
+   ],
+   "expect": [
+    {"frame": 0, "track_ids": [1]},
+    {"frame": 1, "track_ids": [2]},
+    {"frame": 2, "track_ids": [1]}
+   ]
+  },
+  {
+   "name": "class_agnostic_same_id_on_class_change",
+   "config": {"class_aware": false},
+   "fps": 10,
+   "frames": [
+    [[0.5, 0.5, 0.1, 0.1, 0.9, 0]],
+    [[0.5, 0.5, 0.1, 0.1, 0.9, 1]],
+    [[0.5, 0.5, 0.1, 0.1, 0.9, 0]]
+   ],
+   "expect": [
+    {"frame": 0, "track_ids": [1]},
+    {"frame": 1, "track_ids": [1]},
+    {"frame": 2, "track_ids": [1]}
+   ]
+  },
+  {
+   "name": "max_lost_s_time_based_removal",
+   "config": {"max_misses": 100, "max_lost_s": 0.3},
+   "fps": 10,
+   "frames": [
+    [[0.5, 0.5, 0.1, 0.1, 0.9, 0]],
+    [],
+    [],
+    [[0.5, 0.5, 0.1, 0.1, 0.9, 0]],
+    [],
+    [],
+    [],
+    [],
+    [],
+    []
+   ],
+   "expect": [
+    {"frame": 0, "track_ids": [1]},
+    {"frame": 2, "track_ids": []},
+    {"frame": 3, "track_ids": [1]},
+    {"frame": 7, "track_ids": []}
+   ],
+   "expect_removed": [
+    {"frame": 7, "removed": [1]}
+   ]
+  },
+  {
+   "name": "anchor_bottom_center_matching_unchanged",
+   "config": {"anchor": "bottom_center"},
+   "fps": 10,
+   "frames": [
+    [[0.3, 0.5, 0.1, 0.1, 0.9, 0], [0.7, 0.5, 0.1, 0.1, 0.9, 0]],
+    [[0.3, 0.5, 0.1, 0.1, 0.9, 0], [0.7, 0.5, 0.1, 0.1, 0.9, 0]],
+    [[0.3, 0.5, 0.1, 0.1, 0.9, 0], [0.7, 0.5, 0.1, 0.1, 0.9, 0]]
+   ],
+   "expect": [
+    {"frame": 0, "track_ids": [1, 2]},
+    {"frame": 2, "track_ids": [1, 2]}
+   ]
+  },
+  {
+   "name": "iou_then_distance_fallback",
+   "config": {},
+   "fps": 10,
+   "frames": [
+    [[0.5, 0.5, 0.05, 0.05, 0.9, 0]],
+    [],
+    [[0.56, 0.5, 0.05, 0.05, 0.9, 0]]
+   ],
+   "expect": [
+    {"frame": 0, "track_ids": [1]},
+    {"frame": 2, "track_ids": [1]}
+   ]
+  },
+  {
+   "name": "anchor_center_no_fallback_match",
+   "description": "Anchor pair 1/2 (BASE-1 6.2 2026-09-26): same detections under both anchors; with anchor=center the fallback distance is 0.16 > 0.15 so the detection starts a new track, with anchor=bottom_center (next case) the ground-point distance is 0.06 < 0.15 and track 1 survives. Boxes share no overlap (IoU 0), so only the fallback reference point differs.",
+   "config": {"anchor": "center"},
+   "fps": 10,
+   "frames": [
+    [[0.30, 0.30, 0.20, 0.20, 0.9, 0]],
+    [[0.30, 0.46, 0.02, 0.02, 0.9, 0]]
+   ],
+   "expect": [
+    {"frame": 0, "track_ids": [1]},
+    {"frame": 1, "track_ids": [2]}
+   ]
+  },
+  {
+   "name": "anchor_bottom_center_fallback_match",
+   "description": "Same frames as anchor_center_no_fallback_match; anchor=bottom_center keeps track 1. The pair of cases must produce different track_id assignments (checked by test_tracker).",
+   "config": {"anchor": "bottom_center"},
+   "fps": 10,
+   "frames": [
+    [[0.30, 0.30, 0.20, 0.20, 0.9, 0]],
+    [[0.30, 0.46, 0.02, 0.02, 0.9, 0]]
+   ],
+   "expect": [
+    {"frame": 0, "track_ids": [1]},
+    {"frame": 1, "track_ids": [1]}
+   ]
+  }
+ ]
+}

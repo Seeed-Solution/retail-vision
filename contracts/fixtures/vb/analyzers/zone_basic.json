@@ -1,0 +1,26 @@
+{
+ "analyzer": "zone",
+ "config": {
+  "zones": [{"id": "Z1", "polygon": [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]]}],
+  "min_dwell_s": 0.5
+ },
+ "frames": [
+  {"seq": 1, "t": 0.0, "tracks": [{"track_id": 1, "cx": 0.10, "cy": 0.45, "w": 0.1, "h": 0.1, "score": 0.8, "class_id": 1, "misses": 0}]},
+  {"seq": 2, "t": 0.1, "tracks": [{"track_id": 1, "cx": 0.50, "cy": 0.45, "w": 0.1, "h": 0.1, "score": 0.8, "class_id": 1, "misses": 0}]},
+  {"seq": 3, "t": 0.2, "tracks": [{"track_id": 1, "cx": 0.50, "cy": 0.45, "w": 0.1, "h": 0.1, "score": 0.8, "class_id": 1, "misses": 0}]},
+  {"seq": 4, "t": 0.3, "tracks": [{"track_id": 1, "cx": 0.51, "cy": 0.45, "w": 0.1, "h": 0.1, "score": 0.8, "class_id": 1, "misses": 0}]},
+  {"seq": 5, "t": 0.4, "tracks": [{"track_id": 1, "cx": 0.51, "cy": 0.45, "w": 0.1, "h": 0.1, "score": 0.8, "class_id": 1, "misses": 0}]},
+  {"seq": 6, "t": 0.5, "tracks": [{"track_id": 1, "cx": 0.52, "cy": 0.45, "w": 0.1, "h": 0.1, "score": 0.8, "class_id": 1, "misses": 0}]},
+  {"seq": 7, "t": 0.6, "tracks": [{"track_id": 1, "cx": 0.52, "cy": 0.45, "w": 0.1, "h": 0.1, "score": 0.8, "class_id": 1, "misses": 0}]},
+  {"seq": 8, "t": 0.7, "tracks": [{"track_id": 1, "cx": 0.53, "cy": 0.45, "w": 0.1, "h": 0.1, "score": 0.8, "class_id": 1, "misses": 0}]},
+  {"seq": 9, "t": 0.8, "tracks": [{"track_id": 1, "cx": 0.90, "cy": 0.45, "w": 0.1, "h": 0.1, "score": 0.8, "class_id": 1, "misses": 0}]}
+ ],
+ "expect_events": [
+  {"seq": 2, "type": "zone_enter", "track_id": 1,
+   "fields": {"zone_id": "Z1", "class_id": 1, "score": 0.8}},
+  {"seq": 7, "type": "zone_dwell", "track_id": 1,
+   "fields": {"zone_id": "Z1", "dwell_s": 0.5, "class_id": 1, "score": 0.8}},
+  {"seq": 9, "type": "zone_exit", "track_id": 1,
+   "fields": {"zone_id": "Z1", "dwell_s": 0.7, "class_id": 1, "score": 0.8}}
+ ]
+}

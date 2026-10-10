@@ -1,0 +1,15 @@
+{
+  "schema": "vb.config/1",
+  "device_id": "vb-echo-dev",
+  "backend": {"name": "cpu", "model_path": "/models/yolox-tiny.onnx",
+              "input_size": [416, 416], "align": "center",
+              "score_threshold": 0.3, "nms_threshold": 0.45, "options": {}},
+  "mqtt": {"host": "127.0.0.1", "topic_root": "site/vision/vb-echo-dev"},
+  "streams": [
+    {"stream_id": "syn-0", "url": "synthetic://0", "transport": "tcp",
+     "options": {"max_fps": 0, "roi_crop": null}},
+    {"stream_id": "syn-1", "url": "synthetic://1",
+     "options": {"max_fps": 5, "roi_crop": [0.1, 0.1, 0.9, 0.9]}}
+  ],
+  "app": {"module": "vision_base.hooks:EchoApp"}
+}

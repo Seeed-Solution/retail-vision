@@ -1,0 +1,29 @@
+{
+  "schema": "vb.config/1",
+  "device_id": "d-1",
+  "backend": {
+    "name": "cpu",
+    "model_path": "/m.onnx"
+  },
+  "mqtt": {
+    "host": "127.0.0.1",
+    "topic_root": "vb"
+  },
+  "app": {
+    "module": "a:B"
+  },
+  "streams": [
+    {
+      "stream_id": "cam-01",
+      "url": "rtsp://x",
+      "options": {
+        "roi_crop": [
+          0.4,
+          0.1,
+          0.42,
+          0.9
+        ]
+      }
+    }
+  ]
+}

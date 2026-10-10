@@ -1,0 +1,139 @@
+{
+ "analyzer": "dwell",
+ "note": "Anchor inside zone Z -> dwell_start t=1. t=2 anchor (0.95,0.5) outside the zone -> dwell_end left_zone (dwell_s=2); outside the zone nothing accrues.",
+ "config": {
+  "radius": 0.03,
+  "min_dwell_s": 1.0,
+  "zones": [
+   {
+    "id": "Z",
+    "polygon": [
+     [
+      0.1,
+      0.1
+     ],
+     [
+      0.9,
+      0.1
+     ],
+     [
+      0.9,
+      0.9
+     ],
+     [
+      0.1,
+      0.9
+     ]
+    ]
+   }
+  ]
+ },
+ "frames": [
+  {
+   "seq": 1,
+   "t": 0,
+   "tracks": [
+    {
+     "track_id": 1,
+     "cx": 0.5,
+     "cy": 0.44999998807907104,
+     "w": 0.10000000149011612,
+     "h": 0.10000000149011612,
+     "score": 0.800000011920929,
+     "class_id": 0,
+     "misses": 0
+    }
+   ]
+  },
+  {
+   "seq": 2,
+   "t": 1,
+   "tracks": [
+    {
+     "track_id": 1,
+     "cx": 0.5,
+     "cy": 0.44999998807907104,
+     "w": 0.10000000149011612,
+     "h": 0.10000000149011612,
+     "score": 0.800000011920929,
+     "class_id": 0,
+     "misses": 0
+    }
+   ]
+  },
+  {
+   "seq": 3,
+   "t": 2,
+   "tracks": [
+    {
+     "track_id": 1,
+     "cx": 0.949999988079071,
+     "cy": 0.44999998807907104,
+     "w": 0.10000000149011612,
+     "h": 0.10000000149011612,
+     "score": 0.800000011920929,
+     "class_id": 0,
+     "misses": 0
+    }
+   ]
+  },
+  {
+   "seq": 4,
+   "t": 3,
+   "tracks": [
+    {
+     "track_id": 1,
+     "cx": 0.949999988079071,
+     "cy": 0.44999998807907104,
+     "w": 0.10000000149011612,
+     "h": 0.10000000149011612,
+     "score": 0.800000011920929,
+     "class_id": 0,
+     "misses": 0
+    }
+   ]
+  },
+  {
+   "seq": 5,
+   "t": 4,
+   "tracks": [
+    {
+     "track_id": 1,
+     "cx": 0.949999988079071,
+     "cy": 0.44999998807907104,
+     "w": 0.10000000149011612,
+     "h": 0.10000000149011612,
+     "score": 0.800000011920929,
+     "class_id": 0,
+     "misses": 0
+    }
+   ]
+  }
+ ],
+ "expect_events": [
+  {
+   "seq": 2,
+   "type": "dwell_start",
+   "track_id": 1,
+   "fields": {
+    "dwell_s": 1.0,
+    "anchor": [
+     0.5,
+     0.499999989
+    ],
+    "zone_id": "Z",
+    "class_id": 0,
+    "score": 0.800000011920929
+   }
+  },
+  {
+   "seq": 3,
+   "type": "dwell_end",
+   "track_id": 1,
+   "fields": {
+    "dwell_s": 2.0,
+    "reason": "left_zone"
+   }
+  }
+ ]
+}

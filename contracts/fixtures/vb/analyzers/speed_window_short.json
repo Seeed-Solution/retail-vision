@@ -1,0 +1,60 @@
+{
+ "analyzer": "speed",
+ "note": "Track vanishes at t=0.4; history span 0.4 < 0.5*window_s is never judged -> no events.",
+ "config": {
+  "window_s": 1.0,
+  "max_speed": 0.5,
+  "hold_s": 0.5
+ },
+ "frames": [
+  {
+   "seq": 1,
+   "t": 0.0,
+   "tracks": [
+    {
+     "track_id": 1,
+     "cx": 0.5,
+     "cy": 0.44999998807907104,
+     "w": 0.10000000149011612,
+     "h": 0.10000000149011612,
+     "score": 0.800000011920929,
+     "class_id": 0,
+     "misses": 0
+    }
+   ]
+  },
+  {
+   "seq": 2,
+   "t": 0.2,
+   "tracks": [
+    {
+     "track_id": 1,
+     "cx": 0.5,
+     "cy": 0.5699999928474426,
+     "w": 0.10000000149011612,
+     "h": 0.10000000149011612,
+     "score": 0.800000011920929,
+     "class_id": 0,
+     "misses": 0
+    }
+   ]
+  },
+  {
+   "seq": 3,
+   "t": 0.4,
+   "tracks": [
+    {
+     "track_id": 1,
+     "cx": 0.5,
+     "cy": 0.6899999976158142,
+     "w": 0.10000000149011612,
+     "h": 0.10000000149011612,
+     "score": 0.800000011920929,
+     "class_id": 0,
+     "misses": 0
+    }
+   ]
+  }
+ ],
+ "expect_events": []
+}

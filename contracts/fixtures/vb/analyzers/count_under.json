@@ -1,0 +1,58 @@
+{
+ "analyzer": "count_threshold",
+ "note": "min_count=1: empty scene for 2 s -> count_under (count 0, limit 1) at t=2.",
+ "config": {
+  "min_count": 1,
+  "hold_s": 2.0
+ },
+ "frames": [
+  {
+   "seq": 1,
+   "t": 0,
+   "tracks": []
+  },
+  {
+   "seq": 2,
+   "t": 1,
+   "tracks": []
+  },
+  {
+   "seq": 3,
+   "t": 2,
+   "tracks": []
+  },
+  {
+   "seq": 4,
+   "t": 3,
+   "tracks": []
+  },
+  {
+   "seq": 5,
+   "t": 4,
+   "tracks": [
+    {
+     "track_id": 1,
+     "cx": 0.5,
+     "cy": 0.44999998807907104,
+     "w": 0.10000000149011612,
+     "h": 0.10000000149011612,
+     "score": 0.800000011920929,
+     "class_id": 0,
+     "misses": 0
+    }
+   ]
+  }
+ ],
+ "expect_events": [
+  {
+   "seq": 3,
+   "type": "count_under",
+   "track_id": 0,
+   "fields": {
+    "zone_id": "frame",
+    "count": 0,
+    "limit": 1
+   }
+  }
+ ]
+}

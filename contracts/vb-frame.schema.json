@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vb-frame.schema.json",
+  "title": "vb.frame/1",
+  "type": "object",
+  "required": ["schema", "device_id", "stream_id", "seq", "ts_ms", "inference_ms", "detections"],
+  "properties": {
+    "schema": {"const": "vb.frame/1"},
+    "device_id": {"type": "string"},
+    "stream_id": {"type": "string"},
+    "seq": {"type": "integer", "minimum": 0},
+    "ts_ms": {"type": "integer", "minimum": 0},
+    "inference_ms": {"type": "number", "minimum": 0},
+    "detections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["track_id", "class_id", "score", "box"],
+        "properties": {
+          "track_id": {"type": "integer", "minimum": 0},
+          "class_id": {"type": "integer", "minimum": 0},
+          "score": {"type": "number", "minimum": 0, "maximum": 1},
+          "box": {
+            "type": "array", "minItems": 4, "maxItems": 4,
+            "items": {"type": "number", "minimum": 0, "maximum": 1}
+          },
+          "keypoints": {
+            "type": "array",
+            "items": {
+              "type": "array", "minItems": 3, "maxItems": 3,
+              "items": {"type": "number", "minimum": 0, "maximum": 1}
+            }
+          },
+          "attrs": {"type": "object"}
+        }
+      }
+    }
+  }
+}

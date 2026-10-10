@@ -1,0 +1,20 @@
+[project]
+name = "retail-vision"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8", "jsonschema>=4.17,<5", "onnx>=1.16,<2"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "core-py" }
+packages = ["vision_base", "retail_core"]
+
+[tool.pytest.ini_options]
+testpaths = ["core-py", "tests"]
+markers = ["native: needs VB_RUNTIME_BIN", "broker: needs a real MQTT broker (VB_TEST_BROKER=host:port)"]

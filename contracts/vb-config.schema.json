@@ -1,0 +1,184 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vb-config.schema.json",
+  "title": "vb.config/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "device_id", "backend", "mqtt", "app"],
+  "properties": {
+    "schema": { "const": "vb.config/1" },
+    "device_id": { "type": "string", "minLength": 1 },
+    "backend": {
+      "type": "object",
+      "required": ["name", "model_path"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "model_path": { "type": "string", "minLength": 1 },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "What the model's input tensor expects. Absent, it follows the decoder family's own convention: yolox/raw take BGR 0-255, yolov8/yolov8_dfl/yolo_pose/classify take RGB 0-1.",
+          "properties": {
+            "color_order": { "enum": ["bgr", "rgb"] },
+            "divide": { "type": "number", "exclusiveMinimum": 0, "default": 1.0 }
+          }
+        },
+        "model_sha256": {
+          "type": "string", "default": "",
+          "pattern": "^([0-9a-fA-F]{64})?$",
+          "description": "Optional 64-hex-digit sha256 of the model file (case-insensitive). Empty = not checked. A mismatch refuses to load."
+        },
+        "input_size": {
+          "type": "array", "items": { "type": "integer", "minimum": 1 },
+          "minItems": 2, "maxItems": 2, "default": [640, 640]
+        },
+        "align": { "enum": ["center", "top_left"], "default": "center" },
+        "score_threshold": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.35 },
+        "nms_threshold": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.45 },
+        "options": { "type": "object", "default": {} },
+        "decoder": {
+          "type": "object",
+          "required": ["type"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "enum": ["yolox", "yolov8", "yolov8_dfl", "yolo_pose", "classify", "raw"] },
+            "num_classes": { "type": "integer", "minimum": 1, "default": 80 },
+            "reg_max": { "type": "integer", "minimum": 1, "default": 16 },
+            "strides": { "type": "array", "items": { "type": "integer", "minimum": 1 },
+                         "minItems": 1, "default": [8, 16, 32] },
+            "keypoints": { "type": "integer", "minimum": 0, "default": 17 },
+            "top_k": { "type": "integer", "minimum": 1, "default": 1 },
+            "softmax": { "type": "boolean", "default": true }
+          }
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "properties": {
+        "workers": { "default": "auto", "oneOf": [
+          { "const": "auto" },
+          { "type": "integer", "minimum": 1 }
+        ] },
+        "max_streams_per_worker": { "type": "integer", "minimum": 0, "default": 0 },
+        "contexts_per_worker": { "type": "integer", "minimum": 1, "default": 1 },
+        "publishers_per_process": { "type": "integer", "minimum": 1, "default": 1 },
+        "publish_queue": { "type": "integer", "minimum": 1, "default": 256 },
+        "max_streams": { "type": "integer", "minimum": 1, "default": 16 },
+        "open_timeout_s": { "type": "number", "minimum": 0, "exclusiveMinimum": 0, "default": 8.0 },
+        "reconnect_delay_s": { "type": "number", "minimum": 0, "default": 1.0 },
+        "restart_backoff_s": { "type": "number", "minimum": 0, "default": 5.0 }
+      }
+    },
+    "native": {
+      "type": "object",
+      "properties": {
+        "binary": { "type": "string", "pattern": "^/", "default": "/opt/vb/bin/vb-runtime" },
+        "hello_timeout_s": { "type": "number", "minimum": 0, "default": 10.0 },
+        "snapshot_ring": { "type": "integer", "minimum": 1, "default": 2 },
+        "jpeg_quality": { "type": "integer", "minimum": 1, "maximum": 100, "default": 85 }
+      }
+    },
+    "state_dir": { "type": "string", "default": "/data/vb" },
+    "tracker": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "iou_threshold": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.2 },
+        "dist_threshold": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.15 },
+        "max_misses": { "type": "integer", "minimum": 0, "default": 15 },
+        "max_lost_s": { "type": "number", "minimum": 0, "default": 0.0 },
+        "min_hits": { "type": "integer", "minimum": 1, "default": 1 },
+        "class_aware": { "type": "boolean", "default": true },
+        "anchor": { "enum": ["center", "bottom_center"], "default": "center" }
+      }
+    },
+    "analyzers": {
+      "type": "object",
+      "properties": {
+        "plugins": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^/.*\\.so$" },
+          "default": []
+        }
+      }
+    },
+    "mqtt": {
+      "type": "object",
+      "required": ["host", "topic_root"],
+      "properties": {
+        "host": { "type": "string", "minLength": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 1883 },
+        "client_id": { "type": "string", "default": "" },
+        "username": { "type": "string", "default": "" },
+        "password": { "type": "string", "default": "" },
+        "tls": { "type": "boolean", "default": false },
+        "ca_file": { "type": "string", "default": "" },
+        "cert_file": { "type": "string", "default": "" },
+        "key_file": { "type": "string", "default": "" },
+        "keepalive_s": { "type": "number", "minimum": 1, "default": 30 },
+        "topic_root": { "type": "string", "minLength": 1 },
+        "status_interval_s": { "type": "number", "minimum": 0, "exclusiveMinimum": 0, "default": 10 }
+      }
+    },
+    "health": {
+      "type": "object",
+      "properties": {
+        "host": { "type": "string", "default": "127.0.0.1" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 8099 }
+      }
+    },
+    "streams_file": { "type": "string", "default": "" },
+    "streams": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["stream_id", "url"],
+        "properties": {
+          "stream_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
+          "url": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "default": "" },
+          "transport": { "enum": ["tcp", "udp"], "default": "tcp" },
+          "score_threshold": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "default": null },
+          "options": {
+            "type": "object",
+            "properties": {
+              "max_fps": { "type": "number", "minimum": 0, "default": 0 },
+              "roi_crop": {
+                "default": null,
+                "oneOf": [
+                  { "type": "null" },
+                  {
+                    "type": "array", "minItems": 4, "maxItems": 4,
+                    "items": { "type": "number", "minimum": 0, "maximum": 1 }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "default": []
+    },
+    "app": {
+      "type": "object",
+      "required": ["module"],
+      "properties": {
+        "name": { "type": "string", "default": "echo" },
+        "module": { "type": "string", "minLength": 1 },
+        "options": { "type": "object", "default": { "publish_hz": 1.0, "frame_stride": 1 } }
+      }
+    },
+    "dev": {
+      "type": "object",
+      "default": { "raw_tensors": false, "max_fps": 1.0, "max_streams": 1 },
+      "additionalProperties": false,
+      "properties": {
+        "raw_tensors": { "type": "boolean", "default": false,
+          "description": "dev mode only: pass raw model output tensors to Python as VBT1 (requires --dev / allow_dev; rejected in production configs)" },
+        "max_fps": { "type": "number", "exclusiveMinimum": 0, "maximum": 2, "default": 1.0 },
+        "max_streams": { "const": 1, "default": 1 }
+      }
+    }
+  }
+}

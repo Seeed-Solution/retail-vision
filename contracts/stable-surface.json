@@ -1,0 +1,1301 @@
+{
+ "abi": {
+  "VB_ANALYZER_ABI": 1,
+  "functions": [
+   "const vb_analyzer_api* vb_analyzer_entry(void);"
+  ],
+  "structs": {
+   "vb_analyzer_api": [
+    "uint32_t abi",
+    "const char* name",
+    "uint32_t attr_count",
+    "const char* const* attr_names",
+    "void* (*create)(const char* config_json, char* err, size_t errlen)",
+    "void (*destroy)(void* self)",
+    "int (*on_frame)(void* self, const vb_frame_meta* m, const vb_track* tracks, size_t n, float* attrs_out, vb_emit_fn emit, void* sink)",
+    "void (*on_track_removed)(void* self, uint32_t track_id, double t_mono_s)"
+   ],
+   "vb_frame_meta": [
+    "uint32_t stream_index",
+    "uint64_t seq",
+    "double wall_ms, t_mono_s",
+    "int32_t src_w, src_h, model_w, model_h",
+    "float scale, pad_x, pad_y",
+    "uint8_t align"
+   ],
+   "vb_track": [
+    "uint32_t track_id",
+    "float cx, cy, w, h, score",
+    "int32_t class_id",
+    "float vx, vy",
+    "uint32_t hits, misses",
+    "const float* kpts",
+    "uint32_t kpt_count"
+   ]
+  }
+ },
+ "analyzers": {
+  "count": {
+   "count_ten": [
+    "frames"
+   ]
+  },
+  "count_threshold": {
+   "count_over": [
+    "count",
+    "limit",
+    "zone_id"
+   ],
+   "count_under": [
+    "count",
+    "limit",
+    "zone_id"
+   ]
+  },
+  "direction": {
+   "wrong_way": [
+    "angle_deg",
+    "class_id",
+    "diff_deg",
+    "expected_deg",
+    "score",
+    "travel",
+    "zone_id"
+   ],
+   "wrong_way_end": [
+    "duration_s"
+   ]
+  },
+  "dwell": {
+   "dwell_end": [
+    "dwell_s",
+    "reason"
+   ],
+   "dwell_start": [
+    "anchor",
+    "class_id",
+    "dwell_s",
+    "score",
+    "zone_id"
+   ],
+   "dwell_update": [
+    "anchor",
+    "class_id",
+    "dwell_s",
+    "score",
+    "zone_id"
+   ]
+  },
+  "line_cross": {
+   "line_cross": [
+    "anchor",
+    "class_id",
+    "direction",
+    "line_id",
+    "score"
+   ]
+  },
+  "pose_angle": {
+   "angle_in": [
+    "angle_deg",
+    "joint_id"
+   ],
+   "angle_out": [
+    "angle_deg",
+    "class_id",
+    "joint_id",
+    "max_deg",
+    "min_deg",
+    "score"
+   ]
+  },
+  "speed": {
+   "speed_normal": [
+    "speed",
+    "unit"
+   ],
+   "speed_over": [
+    "class_id",
+    "limit",
+    "score",
+    "speed",
+    "unit"
+   ],
+   "speed_under": [
+    "class_id",
+    "limit",
+    "score",
+    "speed",
+    "unit"
+   ]
+  },
+  "zone": {
+   "zone_dwell": [
+    "class_id",
+    "dwell_s",
+    "score",
+    "zone_id"
+   ],
+   "zone_enter": [
+    "class_id",
+    "score",
+    "zone_id"
+   ],
+   "zone_exit": [
+    "class_id",
+    "dwell_s",
+    "score",
+    "zone_id"
+   ]
+  }
+ },
+ "python": {
+  "apps.ConfigApp": {
+   "analyzers": "(self, spec: 'StreamSpec') -> 'list[dict]'",
+   "configure": "(self, options: 'dict', device_id: 'str') -> 'None'",
+   "device_id": "attribute",
+   "event_payload": "(self, ev: 'Event') -> 'dict'",
+   "frame_every": "property",
+   "frame_payload": "(self, res: 'FrameResult', attr_names: 'tuple[str, ...]' = ()) -> 'dict'",
+   "frame_stride": "property",
+   "name": "attribute = 'config'",
+   "on_event": "(self, ctx: 'StreamContext', ev: 'Event') -> 'list[Outgoing]'",
+   "on_frame": "(self, ctx: 'StreamContext', res: 'FrameResult') -> 'list[Outgoing]'",
+   "on_stream_added": "(self, ctx: 'StreamContext') -> 'None'",
+   "on_stream_removed": "(self, ctx: 'StreamContext') -> 'None'",
+   "options": "attribute",
+   "plugins": "(self) -> 'list[str]'",
+   "wants_frames": "property"
+  },
+  "embed.Runtime": {
+   "add_stream": "(self, stream_id: 'str', url: 'str', *, analyzers: 'list[dict] | None' = None, options: 'dict | None' = None, name: 'str' = '', transport: 'str' = 'tcp', score_threshold: 'float | None' = None, timeout_s: 'float' = 10.0) -> 'dict'",
+   "configure_analyzer": "(self, stream_id: 'str', name: 'str', config: 'dict', timeout_s: 'float' = 3.0) -> 'dict'",
+   "frames_dropped": "attribute",
+   "from_config": "classmethod(path: 'str', *, binary: 'str | None' = None, queue_size: 'int' = 1024) -> \"'Runtime'\"",
+   "remove_stream": "(self, stream_id: 'str', timeout_s: 'float' = 5.0) -> 'None'",
+   "results": "(self, timeout_s: 'float | None' = None)",
+   "snapshot": "(self, stream_id: 'str', seq: 'int' = 0, track_id: 'int' = 0, max_side: 'int' = 640) -> 'bytes'",
+   "start": "(self)",
+   "stop": "(self) -> 'None'"
+  },
+  "geom": {
+   "joint_angle_deg": "(a, b, c, src_w: 'int', src_h: 'int') -> 'float'",
+   "point_in_polygon": "(x: 'float', y: 'float', polygon: 'list') -> 'bool'",
+   "source_boxes": "(res: 'FrameResult')",
+   "source_keypoints": "(res: 'FrameResult', det: 'Detection')"
+  },
+  "hooks.AppHooks": {
+   "analyzers": "(self, spec: 'StreamSpec') -> 'list[dict]'",
+   "name": "attribute: str",
+   "on_event": "(self, ctx: 'StreamContext', ev: 'Event') -> 'list[Outgoing]'",
+   "on_frame": "(self, ctx: 'StreamContext', res: 'FrameResult') -> 'list[Outgoing]'",
+   "on_stream_added": "(self, ctx: 'StreamContext') -> 'None'",
+   "on_stream_removed": "(self, ctx: 'StreamContext') -> 'None'",
+   "plugins": "(self) -> 'list[str]'",
+   "wants_frames": "attribute: bool"
+  },
+  "hooks.Outgoing": "(topic_suffix: 'str', payload: 'dict | bytes', qos: 'int' = 0, retain: 'bool' = False) -> None",
+  "hooks.StreamContext": {
+   "analyzer_configs": "(self, hooks: \"'AppHooks'\") -> 'list[dict]'",
+   "attr_names": "attribute",
+   "configure_analyzer": "(self, name: 'str', config: 'dict', timeout_s: 'float' = 3.0) -> 'dict'",
+   "index": "attribute",
+   "last_state": "attribute",
+   "request_snapshot": "(self, seq: 'int' = 0, track_id: 'int' = 0, crop: 'bool' = True, max_side: 'int' = 640, timeout_s: 'float' = 3.0) -> 'tuple[dict, bytes]'",
+   "spec": "attribute",
+   "state": "attribute",
+   "stream_id": "attribute"
+  },
+  "mqtt": {
+   "MqttClient": "(host: 'str', port: 'int' = 1883, client_id: 'str' = '', *, username: 'str' = '', password: 'str' = '', tls: 'bool' = False, ca_file: 'str' = '', cert_file: 'str' = '', key_file: 'str' = '', keepalive_s: 'int' = 30, will: 'Will | None' = None, reconnect_min_s: 'float' = 1.0, reconnect_max_s: 'float' = 60.0, max_inflight: 'int' = 32, on_connect: 'Callable[[], None] | None' = None, on_disconnect: 'Callable[[str], None] | None' = None)",
+   "Will": "(topic: 'str', payload: 'bytes', qos: 'int' = 1, retain: 'bool' = True) -> None",
+   "topic_matches": "(topic_filter: 'str', topic: 'str') -> 'bool'"
+  },
+  "mqtt.MqttClient": {
+   "ca_file": "attribute",
+   "cert_file": "attribute",
+   "client_id": "attribute",
+   "close": "(self, timeout_s: 'float' = 2.0) -> 'None'",
+   "connect": "(self, timeout_s: 'float' = 10.0) -> 'bool'",
+   "connected": "property",
+   "host": "attribute",
+   "keepalive_s": "attribute",
+   "key_file": "attribute",
+   "max_inflight": "attribute",
+   "on_connect": "attribute",
+   "on_disconnect": "attribute",
+   "password": "attribute",
+   "port": "attribute",
+   "publish": "(self, topic: 'str', payload: 'bytes | str', qos: 'int' = 0, retain: 'bool' = False, timeout_s: 'float' = 5.0) -> 'bool'",
+   "reconnect_max_s": "attribute",
+   "reconnect_min_s": "attribute",
+   "stats": "(self) -> 'dict'",
+   "subscribe": "(self, topic_filter: 'str', qos: 'int', callback: 'Callable[[str, bytes, bool], None]') -> 'None'",
+   "tls": "attribute",
+   "unsubscribe": "(self, topic_filter: 'str') -> 'None'",
+   "username": "attribute",
+   "will": "attribute"
+  },
+  "types": {
+   "Detection": {
+    "attrs": {
+     "default": "()",
+     "type": "tuple[float, ...]"
+    },
+    "class_id": {
+     "default": "required",
+     "type": "int"
+    },
+    "cx": {
+     "default": "required",
+     "type": "float"
+    },
+    "cy": {
+     "default": "required",
+     "type": "float"
+    },
+    "h": {
+     "default": "required",
+     "type": "float"
+    },
+    "keypoints": {
+     "default": "()",
+     "type": "tuple[float, ...]"
+    },
+    "score": {
+     "default": "required",
+     "type": "float"
+    },
+    "track_id": {
+     "default": "required",
+     "type": "int"
+    },
+    "w": {
+     "default": "required",
+     "type": "float"
+    }
+   },
+   "Event": {
+    "analyzer": {
+     "default": "required",
+     "type": "str"
+    },
+    "fields": {
+     "default": "required",
+     "type": "dict"
+    },
+    "seq": {
+     "default": "required",
+     "type": "int"
+    },
+    "stream_id": {
+     "default": "required",
+     "type": "str"
+    },
+    "track_id": {
+     "default": "required",
+     "type": "int"
+    },
+    "type": {
+     "default": "required",
+     "type": "str"
+    },
+    "wall_ms": {
+     "default": "required",
+     "type": "float"
+    }
+   },
+   "FrameResult": {
+    "detections": {
+     "default": "required",
+     "type": "list[Detection]"
+    },
+    "geom": {
+     "default": "required",
+     "type": "LetterboxGeom"
+    },
+    "inference_ms": {
+     "default": "required",
+     "type": "float"
+    },
+    "queue_delay_ms": {
+     "default": "required",
+     "type": "float"
+    },
+    "seq": {
+     "default": "required",
+     "type": "int"
+    },
+    "stream_id": {
+     "default": "required",
+     "type": "str"
+    },
+    "wall_ms": {
+     "default": "required",
+     "type": "float"
+    }
+   },
+   "Hello": {
+    "abi": {
+     "default": "required",
+     "type": "int"
+    },
+    "attr_names": {
+     "default": "required",
+     "type": "tuple[str, ...]"
+    },
+    "backend": {
+     "default": "required",
+     "type": "str"
+    },
+    "caps": {
+     "default": "required",
+     "type": "dict"
+    },
+    "model_hw": {
+     "default": "required",
+     "type": "tuple[int, int]"
+    },
+    "model_sha256": {
+     "default": "required",
+     "type": "str"
+    },
+    "pid": {
+     "default": "required",
+     "type": "int"
+    },
+    "runtime_version": {
+     "default": "required",
+     "type": "str"
+    }
+   },
+   "LetterboxGeom": {
+    "align": {
+     "default": "required",
+     "type": "str"
+    },
+    "model_h": {
+     "default": "required",
+     "type": "int"
+    },
+    "model_w": {
+     "default": "required",
+     "type": "int"
+    },
+    "pad_x": {
+     "default": "required",
+     "type": "float"
+    },
+    "pad_y": {
+     "default": "required",
+     "type": "float"
+    },
+    "scale": {
+     "default": "required",
+     "type": "float"
+    },
+    "src_h": {
+     "default": "required",
+     "type": "int"
+    },
+    "src_w": {
+     "default": "required",
+     "type": "int"
+    }
+   },
+   "RawTensor": {
+    "data": {
+     "default": "required",
+     "type": "bytes"
+    },
+    "dims": {
+     "default": "required",
+     "type": "tuple[int, ...]"
+    },
+    "dtype": {
+     "default": "required",
+     "type": "int"
+    },
+    "name": {
+     "default": "required",
+     "type": "str"
+    },
+    "nhwc": {
+     "default": "required",
+     "type": "bool"
+    },
+    "scale": {
+     "default": "required",
+     "type": "float"
+    },
+    "zero_point": {
+     "default": "required",
+     "type": "int"
+    }
+   },
+   "StreamSpec": {
+    "name": {
+     "default": "''",
+     "type": "str"
+    },
+    "options": {
+     "default": "factory:dict",
+     "type": "dict"
+    },
+    "score_threshold": {
+     "default": "None",
+     "type": "float | None"
+    },
+    "stream_id": {
+     "default": "required",
+     "type": "str"
+    },
+    "transport": {
+     "default": "'tcp'",
+     "type": "str"
+    },
+    "url": {
+     "default": "required",
+     "type": "str"
+    }
+   },
+   "TensorFrame": {
+    "geom": {
+     "default": "required",
+     "type": "LetterboxGeom"
+    },
+    "seq": {
+     "default": "required",
+     "type": "int"
+    },
+    "stream_id": {
+     "default": "required",
+     "type": "str"
+    },
+    "tensors": {
+     "default": "required",
+     "type": "list[RawTensor]"
+    },
+    "wall_ms": {
+     "default": "required",
+     "type": "float"
+    }
+   }
+  }
+ },
+ "schemas": {
+  "vb-ack": {
+   "$id": "vb-ack.schema.json",
+   "properties": {
+    "applied": {
+     "type": "object"
+    },
+    "command": {
+     "type": "string"
+    },
+    "device_id": {
+     "type": "string"
+    },
+    "error": {
+     "type": "string"
+    },
+    "ok": {
+     "type": "boolean"
+    },
+    "request_id": {
+     "type": "string"
+    },
+    "schema": {
+     "const": "vb.ack/1"
+    },
+    "session_id": {
+     "type": "string"
+    },
+    "timestamp": {
+     "type": "integer"
+    }
+   },
+   "required": [
+    "command",
+    "device_id",
+    "ok",
+    "request_id",
+    "schema",
+    "session_id",
+    "timestamp"
+   ],
+   "type": "object"
+  },
+  "vb-command": {
+   "$id": "vb-command.schema.json",
+   "properties": {
+    "command": {
+     "enum": [
+      "add_stream",
+      "remove_stream",
+      "set_threshold",
+      "list_streams"
+     ]
+    },
+    "device_id": {
+     "type": "string"
+    },
+    "params": {
+     "properties": {
+      "name": {
+       "type": "string"
+      },
+      "options": {
+       "properties": {
+        "max_fps": {
+         "minimum": 0,
+         "type": "number"
+        },
+        "roi_crop": {
+         "oneOf": [
+          {
+           "type": "null"
+          },
+          {
+           "items": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+           },
+           "maxItems": 4,
+           "minItems": 4,
+           "type": "array"
+          }
+         ]
+        }
+       },
+       "type": "object"
+      },
+      "score_threshold": {
+       "maximum": 1,
+       "minimum": 0,
+       "type": "number"
+      },
+      "stream_id": {
+       "pattern": "^[A-Za-z0-9_-]{1,64}$",
+       "type": "string"
+      },
+      "transport": {
+       "enum": [
+        "tcp",
+        "udp"
+       ]
+      },
+      "url": {
+       "type": "string"
+      }
+     },
+     "type": "object"
+    },
+    "request_id": {
+     "maxLength": 128,
+     "minLength": 1,
+     "type": "string"
+    },
+    "schema": {
+     "const": "vb.command/1"
+    },
+    "timestamp": {
+     "type": "integer"
+    }
+   },
+   "required": [
+    "command",
+    "device_id",
+    "params",
+    "request_id",
+    "schema"
+   ],
+   "type": "object"
+  },
+  "vb-config": {
+   "$id": "vb-config.schema.json",
+   "additionalProperties": false,
+   "properties": {
+    "analyzers": {
+     "properties": {
+      "plugins": {
+       "default": [],
+       "items": {
+        "pattern": "^/.*\\.so$",
+        "type": "string"
+       },
+       "type": "array"
+      }
+     },
+     "type": "object"
+    },
+    "app": {
+     "properties": {
+      "module": {
+       "minLength": 1,
+       "type": "string"
+      },
+      "name": {
+       "default": "echo",
+       "type": "string"
+      },
+      "options": {
+       "default": {},
+       "type": "object"
+      }
+     },
+     "required": [
+      "module"
+     ],
+     "type": "object"
+    },
+    "backend": {
+     "properties": {
+      "align": {
+       "default": "center",
+       "enum": [
+        "center",
+        "top_left"
+       ]
+      },
+      "decoder": {
+       "additionalProperties": false,
+       "properties": {
+        "keypoints": {
+         "default": 17,
+         "minimum": 0,
+         "type": "integer"
+        },
+        "num_classes": {
+         "default": 80,
+         "minimum": 1,
+         "type": "integer"
+        },
+        "reg_max": {
+         "default": 16,
+         "minimum": 1,
+         "type": "integer"
+        },
+        "softmax": {
+         "default": true,
+         "type": "boolean"
+        },
+        "strides": {
+         "default": [
+          8,
+          16,
+          32
+         ],
+         "items": {
+          "minimum": 1,
+          "type": "integer"
+         },
+         "minItems": 1,
+         "type": "array"
+        },
+        "top_k": {
+         "default": 1,
+         "minimum": 1,
+         "type": "integer"
+        },
+        "type": {
+         "enum": [
+          "yolox",
+          "yolov8",
+          "yolov8_dfl",
+          "yolo_pose",
+          "classify",
+          "raw"
+         ]
+        }
+       },
+       "required": [
+        "type"
+       ],
+       "type": "object"
+      },
+      "input": {
+       "additionalProperties": false,
+       "properties": {
+        "color_order": {
+         "enum": [
+          "bgr",
+          "rgb"
+         ]
+        },
+        "divide": {
+         "default": 1.0,
+         "exclusiveMinimum": 0,
+         "type": "number"
+        }
+       },
+       "type": "object"
+      },
+      "input_size": {
+       "default": [
+        640,
+        640
+       ],
+       "items": {
+        "minimum": 1,
+        "type": "integer"
+       },
+       "maxItems": 2,
+       "minItems": 2,
+       "type": "array"
+      },
+      "model_path": {
+       "minLength": 1,
+       "type": "string"
+      },
+      "model_sha256": {
+       "default": "",
+       "pattern": "^([0-9a-fA-F]{64})?$",
+       "type": "string"
+      },
+      "name": {
+       "minLength": 1,
+       "type": "string"
+      },
+      "nms_threshold": {
+       "default": 0.45,
+       "maximum": 1,
+       "minimum": 0,
+       "type": "number"
+      },
+      "options": {
+       "default": {},
+       "type": "object"
+      },
+      "score_threshold": {
+       "default": 0.35,
+       "maximum": 1,
+       "minimum": 0,
+       "type": "number"
+      }
+     },
+     "required": [
+      "model_path",
+      "name"
+     ],
+     "type": "object"
+    },
+    "dev": {
+     "additionalProperties": false,
+     "default": {},
+     "properties": {
+      "max_fps": {
+       "default": 1.0,
+       "exclusiveMinimum": 0,
+       "maximum": 2,
+       "type": "number"
+      },
+      "max_streams": {
+       "const": 1,
+       "default": 1
+      },
+      "raw_tensors": {
+       "default": false,
+       "type": "boolean"
+      }
+     },
+     "type": "object"
+    },
+    "device_id": {
+     "minLength": 1,
+     "type": "string"
+    },
+    "health": {
+     "properties": {
+      "host": {
+       "default": "127.0.0.1",
+       "type": "string"
+      },
+      "port": {
+       "default": 8099,
+       "maximum": 65535,
+       "minimum": 1,
+       "type": "integer"
+      }
+     },
+     "type": "object"
+    },
+    "mqtt": {
+     "properties": {
+      "ca_file": {
+       "default": "",
+       "type": "string"
+      },
+      "cert_file": {
+       "default": "",
+       "type": "string"
+      },
+      "client_id": {
+       "default": "",
+       "type": "string"
+      },
+      "host": {
+       "minLength": 1,
+       "type": "string"
+      },
+      "keepalive_s": {
+       "default": 30,
+       "minimum": 1,
+       "type": "number"
+      },
+      "key_file": {
+       "default": "",
+       "type": "string"
+      },
+      "password": {
+       "default": "",
+       "type": "string"
+      },
+      "port": {
+       "default": 1883,
+       "maximum": 65535,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "status_interval_s": {
+       "default": 10,
+       "exclusiveMinimum": 0,
+       "minimum": 0,
+       "type": "number"
+      },
+      "tls": {
+       "default": false,
+       "type": "boolean"
+      },
+      "topic_root": {
+       "minLength": 1,
+       "type": "string"
+      },
+      "username": {
+       "default": "",
+       "type": "string"
+      }
+     },
+     "required": [
+      "host",
+      "topic_root"
+     ],
+     "type": "object"
+    },
+    "native": {
+     "properties": {
+      "binary": {
+       "default": "/opt/vb/bin/vb-runtime",
+       "pattern": "^/",
+       "type": "string"
+      },
+      "hello_timeout_s": {
+       "default": 10.0,
+       "minimum": 0,
+       "type": "number"
+      },
+      "jpeg_quality": {
+       "default": 85,
+       "maximum": 100,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "snapshot_ring": {
+       "default": 2,
+       "minimum": 1,
+       "type": "integer"
+      }
+     },
+     "type": "object"
+    },
+    "runtime": {
+     "properties": {
+      "contexts_per_worker": {
+       "default": 1,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "max_streams": {
+       "default": 16,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "max_streams_per_worker": {
+       "default": 0,
+       "minimum": 0,
+       "type": "integer"
+      },
+      "open_timeout_s": {
+       "default": 8.0,
+       "exclusiveMinimum": 0,
+       "minimum": 0,
+       "type": "number"
+      },
+      "publish_queue": {
+       "default": 256,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "publishers_per_process": {
+       "default": 1,
+       "minimum": 1,
+       "type": "integer"
+      },
+      "reconnect_delay_s": {
+       "default": 1.0,
+       "minimum": 0,
+       "type": "number"
+      },
+      "restart_backoff_s": {
+       "default": 5.0,
+       "minimum": 0,
+       "type": "number"
+      },
+      "workers": {
+       "default": "auto",
+       "oneOf": [
+        {
+         "const": "auto"
+        },
+        {
+         "minimum": 1,
+         "type": "integer"
+        }
+       ]
+      }
+     },
+     "type": "object"
+    },
+    "schema": {
+     "const": "vb.config/1"
+    },
+    "state_dir": {
+     "default": "/data/vb",
+     "type": "string"
+    },
+    "streams": {
+     "default": [],
+     "items": {
+      "properties": {
+       "name": {
+        "default": "",
+        "type": "string"
+       },
+       "options": {
+        "properties": {
+         "max_fps": {
+          "default": 0,
+          "minimum": 0,
+          "type": "number"
+         },
+         "roi_crop": {
+          "default": null,
+          "oneOf": [
+           {
+            "type": "null"
+           },
+           {
+            "items": {
+             "maximum": 1,
+             "minimum": 0,
+             "type": "number"
+            },
+            "maxItems": 4,
+            "minItems": 4,
+            "type": "array"
+           }
+          ]
+         }
+        },
+        "type": "object"
+       },
+       "score_threshold": {
+        "default": null,
+        "maximum": 1,
+        "minimum": 0,
+        "type": [
+         "number",
+         "null"
+        ]
+       },
+       "stream_id": {
+        "pattern": "^[A-Za-z0-9_-]{1,64}$",
+        "type": "string"
+       },
+       "transport": {
+        "default": "tcp",
+        "enum": [
+         "tcp",
+         "udp"
+        ]
+       },
+       "url": {
+        "minLength": 1,
+        "type": "string"
+       }
+      },
+      "required": [
+       "stream_id",
+       "url"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "streams_file": {
+     "default": "",
+     "type": "string"
+    },
+    "tracker": {
+     "properties": {
+      "anchor": {
+       "default": "center",
+       "enum": [
+        "center",
+        "bottom_center"
+       ]
+      },
+      "class_aware": {
+       "default": true,
+       "type": "boolean"
+      },
+      "dist_threshold": {
+       "default": 0.15,
+       "maximum": 1,
+       "minimum": 0,
+       "type": "number"
+      },
+      "enabled": {
+       "default": true,
+       "type": "boolean"
+      },
+      "iou_threshold": {
+       "default": 0.2,
+       "maximum": 1,
+       "minimum": 0,
+       "type": "number"
+      },
+      "max_lost_s": {
+       "default": 0.0,
+       "minimum": 0,
+       "type": "number"
+      },
+      "max_misses": {
+       "default": 15,
+       "minimum": 0,
+       "type": "integer"
+      },
+      "min_hits": {
+       "default": 1,
+       "minimum": 1,
+       "type": "integer"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "required": [
+    "app",
+    "backend",
+    "device_id",
+    "mqtt",
+    "schema"
+   ],
+   "type": "object"
+  },
+  "vb-event": {
+   "$id": "vb-event.schema.json",
+   "properties": {
+    "analyzer": {
+     "minLength": 1,
+     "type": "string"
+    },
+    "device_id": {
+     "type": "string"
+    },
+    "fields": {
+     "type": "object"
+    },
+    "schema": {
+     "const": "vb.event/1"
+    },
+    "seq": {
+     "minimum": 0,
+     "type": "integer"
+    },
+    "stream_id": {
+     "type": "string"
+    },
+    "track_id": {
+     "minimum": 0,
+     "type": "integer"
+    },
+    "ts_ms": {
+     "minimum": 0,
+     "type": "integer"
+    },
+    "type": {
+     "minLength": 1,
+     "type": "string"
+    }
+   },
+   "required": [
+    "analyzer",
+    "device_id",
+    "fields",
+    "schema",
+    "seq",
+    "stream_id",
+    "track_id",
+    "ts_ms",
+    "type"
+   ],
+   "type": "object"
+  },
+  "vb-frame": {
+   "$id": "vb-frame.schema.json",
+   "properties": {
+    "detections": {
+     "items": {
+      "properties": {
+       "attrs": {
+        "type": "object"
+       },
+       "box": {
+        "items": {
+         "maximum": 1,
+         "minimum": 0,
+         "type": "number"
+        },
+        "maxItems": 4,
+        "minItems": 4,
+        "type": "array"
+       },
+       "class_id": {
+        "minimum": 0,
+        "type": "integer"
+       },
+       "keypoints": {
+        "items": {
+         "items": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+         },
+         "maxItems": 3,
+         "minItems": 3,
+         "type": "array"
+        },
+        "type": "array"
+       },
+       "score": {
+        "maximum": 1,
+        "minimum": 0,
+        "type": "number"
+       },
+       "track_id": {
+        "minimum": 0,
+        "type": "integer"
+       }
+      },
+      "required": [
+       "box",
+       "class_id",
+       "score",
+       "track_id"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "device_id": {
+     "type": "string"
+    },
+    "inference_ms": {
+     "minimum": 0,
+     "type": "number"
+    },
+    "schema": {
+     "const": "vb.frame/1"
+    },
+    "seq": {
+     "minimum": 0,
+     "type": "integer"
+    },
+    "stream_id": {
+     "type": "string"
+    },
+    "ts_ms": {
+     "minimum": 0,
+     "type": "integer"
+    }
+   },
+   "required": [
+    "detections",
+    "device_id",
+    "inference_ms",
+    "schema",
+    "seq",
+    "stream_id",
+    "ts_ms"
+   ],
+   "type": "object"
+  },
+  "vb-status": {
+   "$id": "vb-status.schema.json",
+   "properties": {
+    "device_id": {
+     "type": "string"
+    },
+    "online": {
+     "type": "boolean"
+    },
+    "schema": {
+     "const": "vb.status/1"
+    },
+    "session_id": {
+     "type": "string"
+    },
+    "shards": {
+     "type": "integer"
+    },
+    "streams": {
+     "items": {},
+     "type": "array"
+    },
+    "timestamp": {
+     "type": "integer"
+    },
+    "uptime_s": {
+     "type": "number"
+    },
+    "versions": {
+     "properties": {
+      "app": {
+       "type": "string"
+      },
+      "backend": {
+       "type": "string"
+      },
+      "base": {
+       "type": "string"
+      },
+      "model_sha256": {
+       "type": "string"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "required": [
+    "device_id",
+    "online",
+    "schema",
+    "session_id",
+    "timestamp"
+   ],
+   "type": "object"
+  }
+ }
+}

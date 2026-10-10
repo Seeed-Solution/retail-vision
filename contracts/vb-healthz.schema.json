@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vb-healthz.schema.json",
+  "title": "GET /healthz body",
+  "type": "object",
+  "required": ["status", "device_id", "backend", "base_version", "uptime_s",
+               "mqtt", "supervisor", "shards", "rss_kb_total", "streams"],
+  "properties": {
+    "status": {"enum": ["ok", "degraded"]},
+    "device_id": {"type": "string"},
+    "backend": {"type": "string"},
+    "base_version": {"type": "string"},
+    "uptime_s": {"type": "number"},
+    "error": {"type": "string"},
+    "mqtt": {
+      "type": "object",
+      "required": ["control_connected", "publish_connected", "queue_depth", "dropped"],
+      "properties": {
+        "control_connected": {"type": "boolean"},
+        "publish_connected": {"type": "array", "items": {"type": "boolean"}},
+        "queue_depth": {"type": "array", "items": {"type": "integer"}},
+        "dropped": {"type": "array", "items": {"type": "integer"}}
+      }
+    },
+    "supervisor": {
+      "type": "object",
+      "required": ["pid", "rss_kb", "cpu_s"],
+      "properties": {
+        "pid": {"type": "integer"},
+        "rss_kb": {"type": ["integer", "null"]},
+        "cpu_s": {"type": ["number", "null"]}
+      }
+    },
+    "shards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["index", "pid", "alive", "restarts", "rss_kb", "cpu_s",
+                     "contexts", "streams", "runtime"],
+        "properties": {
+          "index": {"type": "integer"},
+          "pid": {"type": ["integer", "null"]},
+          "alive": {"type": "boolean"},
+          "restarts": {"type": "integer"},
+          "rss_kb": {"type": ["integer", "null"]},
+          "cpu_s": {"type": ["number", "null"]},
+          "contexts": {"type": "integer"},
+          "streams": {"type": "array", "items": {"type": "string"}},
+          "runtime": {
+            "type": "object",
+            "required": ["pid", "alive", "restarts", "rss_kb", "cpu_s",
+                         "version", "backend"],
+            "properties": {
+              "pid": {"type": ["integer", "null"]},
+              "alive": {"type": "boolean"},
+              "restarts": {"type": "integer"},
+              "rss_kb": {"type": ["integer", "null"]},
+              "cpu_s": {"type": ["number", "null"]},
+              "version": {"type": "string"},
+              "backend": {"type": "string"}
+            }
+          },
+          "app": {"type": "object"},
+          "hook_budget": {
+            "type": "object",
+            "required": ["core", "limit", "exceeded", "by_method", "advice"],
+            "properties": {
+              "core": {"type": "number", "minimum": 0},
+              "limit": {"type": "number", "minimum": 0},
+              "exceeded": {"type": "boolean"},
+              "by_method": {
+                "type": "object",
+                "required": ["on_frame", "on_event", "other"],
+                "properties": {
+                  "on_frame": {"type": "number", "minimum": 0},
+                  "on_event": {"type": "number", "minimum": 0},
+                  "other": {"type": "number", "minimum": 0}
+                }
+              },
+              "advice": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "app": {"type": "object"},
+    "rss_kb_total": {"type": "integer"},
+    "streams": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["stream_id", "state", "fps", "decode", "fallback_active"],
+        "properties": {
+          "stream_id": {"type": "string"},
+          "name": {"type": "string"},
+          "state": {"enum": ["starting", "running", "reconnecting", "stopped", "error"]},
+          "fps": {"type": "number"},
+          "decode": {"type": "string"},
+          "fallback_active": {"type": "boolean"},
+          "score_threshold": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+          "shard": {"type": "integer"},
+          "hook_frames_dropped": {"type": "integer"}
+        }
+      }
+    }
+  }
+}

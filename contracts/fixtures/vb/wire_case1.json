@@ -1,0 +1,19 @@
+{
+ "magic": "VBR1",
+ "note": "0 detections, center letterbox 1280x720 -> 640x640",
+ "attr_names": [],
+ "stream_index": 0,
+ "seq": 42,
+ "wall_ms": 1790000000123.5,
+ "src_w": 1280,
+ "src_h": 720,
+ "model_w": 640,
+ "model_h": 640,
+ "scale": 0.5,
+ "pad_x": 0.0,
+ "pad_y": 140.0,
+ "align": 0,
+ "inference_ms": 12.5,
+ "queue_delay_ms": 1.25,
+ "detections": []
+}

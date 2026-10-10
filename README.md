@@ -17,6 +17,11 @@ Point it at an RTSP camera and it tells you how many people are in the room, whi
 ones are browsing, which have stopped in front of something, and where they stand —
 as a live Grafana dashboard with a floor-plan heatmap and the camera feed beside it.
 
+- **Vision base quickstart:** camera to MQTT events with one config file —
+  [docs/quickstart.md](docs/quickstart.md)
+- **Extending the vision base:** hooks, C/C++ analyzer plugins, new models —
+  [docs/extending.md](docs/extending.md)
+
 The part that is unusual: the tracker, the dwell state machine, the rolling zone
 metrics and the MQTT publisher are **one implementation shared across four
 accelerator families**. A backend supplies a frame source and a `detect()` call;

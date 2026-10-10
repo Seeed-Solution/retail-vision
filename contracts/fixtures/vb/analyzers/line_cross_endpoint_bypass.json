@@ -1,0 +1,15 @@
+{
+ "description": "Anchor walks around the far endpoint of segment (0.4,0.4)->(0.6,0.6): the side flips while the projection is beyond 1+segment_margin(0.05), so no crossing is counted.",
+ "analyzer": "line_cross",
+ "config": {
+  "lines": [{"id": "L", "a": [0.4, 0.4], "b": [0.6, 0.6]}]
+ },
+ "frames": [
+  {"seq": 1, "t": 0.0, "tracks": [{"track_id": 1, "cx": 0.42, "cy": 0.45, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 2, "t": 0.1, "tracks": [{"track_id": 1, "cx": 0.42, "cy": 0.45, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 3, "t": 0.2, "tracks": [{"track_id": 1, "cx": 0.42, "cy": 0.45, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 4, "t": 0.3, "tracks": [{"track_id": 1, "cx": 0.72, "cy": 0.47, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]},
+  {"seq": 5, "t": 0.4, "tracks": [{"track_id": 1, "cx": 0.80, "cy": 0.40, "w": 0.1, "h": 0.1, "score": 0.9, "class_id": 2, "misses": 0}]}
+ ],
+ "expect_events": []
+}
