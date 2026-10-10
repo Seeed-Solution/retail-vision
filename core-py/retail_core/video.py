@@ -27,6 +27,12 @@ import numpy as np
 
 
 def aspect_fit_geometry(source_w: int, source_h: int, size: int = 640):
+    """(scaled_w, scaled_h, pad_x, pad_y) of a centred square letterbox.
+
+    Same scale and padding as vision_base.letterbox.fit (cross-checked in
+    tests/test_math_golden.py); kept because fit() does not expose the scaled
+    size, and backends/rknn imports this name.
+    """
     if source_w <= 0 or source_h <= 0 or size <= 0:
         raise ValueError("source dimensions and size must be positive")
     scale = min(size / source_w, size / source_h)

@@ -1,0 +1,23 @@
+{
+ "timestamp": 1760001000066,
+ "frame_id": 1,
+ "frame_width": 1280,
+ "frame_height": 720,
+ "fps": 0.0,
+ "inference_time_ms": 10.0,
+ "zone": {
+  "occupancy_count": 1,
+  "browsing_count": 1,
+  "engaged_count": 0,
+  "assist_count": 0,
+  "peak_customer": 1,
+  "avg_dwell_time": 0.0,
+  "avg_engagement_time": 0.0,
+  "avg_velocity": 0.0,
+  "entry_count": 0,
+  "exit_count": 0
+ },
+ "persons": [],
+ "camera_id": "cam-a",
+ "source_backend": "golden_stub"
+}

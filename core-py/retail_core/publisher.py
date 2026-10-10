@@ -1,132 +1,132 @@
-"""MQTT publishing layer: minimal MQTT 3.1.1 QoS0 client with Last Will.
+"""MQTT publishing layer: legacy retail wire format over vision_base's client.
 
-Pure I/O over a socket, no board or SDK dependency, so every backend shares it.
+Transport (CONNECT/LWT, keepalive PINGREQ, TLS, background reconnect with
+backoff) is ``vision_base.mqtt.MqttClient``. This module only keeps what the
+retail wire contract needs on top of it, byte-for-byte as before:
 
-paho is deliberately not a dependency of the deployment image. The publisher
-registers `<installation>/retail-vision/status` as its will (payload "offline",
-retained) at CONNECT time and publishes "online" retained immediately after
-CONNACK, so a broker-side disconnect flips the topic without any app action.
+* ``<installation>/retail-vision/status`` is registered as the will (payload
+  ``offline``, QoS0, retained) at CONNECT time, and ``online`` (QoS0,
+  retained) is published right after every CONNACK, so a broker-side
+  disconnect flips the topic without any app action;
+* results are compact JSON (``separators=(",", ":")``, ``ensure_ascii=False``),
+  QoS0, not retained, on ``<installation>/retail-vision/results/<camera>``;
+* a graceful shutdown publishes ``offline`` retained, then DISCONNECT.
+
+Outage behaviour (changed from the synchronous publisher): ``publish()``
+never blocks on a reconnect. While the session is down, each call keeps only
+the latest payload per topic and raises ``OSError``. When the client
+reconnects it publishes retained ``online`` first, then each topic's held
+payload only if it was produced at most ``replay_max_age_s`` (default 2.0 s)
+before the reconnect; older ones are dropped and counted in ``stats()``.
+The previous implementation made two synchronous connect attempts (up to 5 s
+each) inside every publish during an outage and then dropped the message.
+
+paho is deliberately not a dependency of the deployment image; the
+vision_base client is standard library only.
 """
 from __future__ import annotations
 
 import json
 import os
-import socket
-import ssl
-import struct
 import threading
+import time
 
+from vision_base.mqtt import MqttClient, Will
 
-def _remaining(n: int) -> bytes:
-    out = bytearray()
-    while True:
-        byte = n % 128
-        n //= 128
-        if n:
-            byte |= 128
-        out.append(byte)
-        if not n:
-            return bytes(out)
-
-
-def _mqtt_string(value: str) -> bytes:
-    data = value.encode()
-    return struct.pack("!H", len(data)) + data
+REPLAY_MAX_AGE_S = 2.0
 
 
 class MqttPublisher:
     def __init__(self, cfg, status_topic=None, online_payload=b"online",
-                 offline_payload=b"offline"):
+                 offline_payload=b"offline", replay_max_age_s=REPLAY_MAX_AGE_S,
+                 reconnect_min_s=1.0, reconnect_max_s=30.0):
         self.cfg = cfg
         self.status_topic = status_topic
-        self.online_payload = online_payload
-        self.offline_payload = offline_payload
-        self.sock = None
-        self.lock = threading.Lock()
+        self.online_payload = bytes(online_payload)
+        self.offline_payload = bytes(offline_payload)
+        self.replay_max_age_s = float(replay_max_age_s)
+        will = (Will(status_topic, self.offline_payload, qos=0, retain=True)
+                if status_topic else None)
+        self.client = MqttClient(
+            cfg["host"], int(cfg.get("port", 1883)),
+            cfg.get("client_id") or f"retail-vision-{os.getpid()}",
+            username=cfg.get("username") or "", password=cfg.get("password") or "",
+            tls=bool(cfg.get("tls")), ca_file=cfg.get("ca_file") or "",
+            keepalive_s=int(cfg.get("keepalive_sec", 30)), will=will,
+            reconnect_min_s=reconnect_min_s, reconnect_max_s=reconnect_max_s,
+            on_connect=self._on_connect, on_disconnect=self._on_disconnect)
+        # Serializes results against the status publish of a new session, so
+        # no result can precede that session's retained "online".
+        self._lock = threading.Lock()
+        self._ready = threading.Event()
+        self._held = {}  # topic -> (monotonic time produced, payload bytes)
+        self._stats = {"published": 0, "held": 0, "replayed": 0, "dropped_stale": 0}
 
-    # -- wire helpers -----------------------------------------------------
-    @staticmethod
-    def _publish_packet(topic: str, data: bytes, retain: bool = False) -> bytes:
-        body = _mqtt_string(topic) + data
-        header = 0x30 | (0x01 if retain else 0x00)
-        return bytes((header,)) + _remaining(len(body)) + body
+    # -- session callbacks (vision_base IO thread) ---------------------------
+    def _on_connect(self):
+        with self._lock:
+            if self.status_topic:
+                self.client.publish(self.status_topic, self.online_payload,
+                                    qos=0, retain=True)
+            now = time.monotonic()
+            held, self._held = self._held, {}
+            for topic, (produced, data) in held.items():
+                if now - produced <= self.replay_max_age_s and \
+                        self.client.publish(topic, data, qos=0):
+                    self._stats["replayed"] += 1
+                else:
+                    self._stats["dropped_stale"] += 1
+            self._ready.set()
 
-    def _connect(self):
-        raw = socket.create_connection((self.cfg["host"], int(self.cfg.get("port", 1883))), 5)
-        if self.cfg.get("tls"):
-            ctx = ssl.create_default_context(cafile=self.cfg.get("ca_file") or None)
-            raw = ctx.wrap_socket(raw, server_hostname=self.cfg["host"])
-        client = self.cfg.get("client_id") or f"retail-vision-{os.getpid()}"
-        flags = 0x02  # clean session
-        payload = _mqtt_string(client)
-        if self.status_topic:
-            # will flag + will retain, QoS 0
-            flags |= 0x04 | 0x20
-            payload += _mqtt_string(self.status_topic)
-            payload += struct.pack("!H", len(self.offline_payload)) + self.offline_payload
-        if self.cfg.get("username"):
-            flags |= 0x80
-            payload += _mqtt_string(self.cfg["username"])
-        if self.cfg.get("password"):
-            flags |= 0x40
-            payload += _mqtt_string(self.cfg["password"])
-        variable = (_mqtt_string("MQTT") + bytes((4, flags))
-                    + struct.pack("!H", int(self.cfg.get("keepalive_sec", 30))))
-        packet = variable + payload
-        raw.sendall(b"\x10" + _remaining(len(packet)) + packet)
-        if raw.recv(4)[-1:] != b"\x00":
-            raise ConnectionError("MQTT CONNACK rejected")
-        self.sock = raw
-        if self.status_topic:
-            raw.sendall(self._publish_packet(self.status_topic, self.online_payload, retain=True))
-
-    def _send(self, packet: bytes):
-        with self.lock:
-            for attempt in range(2):
-                try:
-                    if self.sock is None:
-                        self._connect()
-                    self.sock.sendall(packet)
-                    return
-                except OSError:
-                    if self.sock:
-                        try:
-                            self.sock.close()
-                        except OSError:
-                            pass
-                    self.sock = None
-                    if attempt:
-                        raise
+    def _on_disconnect(self, _reason):
+        self._ready.clear()
 
     # -- public API -------------------------------------------------------
-    def connect(self):
-        with self.lock:
-            if self.sock is None:
-                self._connect()
+    def connect(self, timeout_s=10.0):
+        """Wait for the first session (CONNACK + retained "online").
+
+        Raises ``ConnectionError`` (an ``OSError``) when it is not up within
+        ``timeout_s``; the client keeps reconnecting in the background.
+        """
+        deadline = time.monotonic() + timeout_s
+        if not self.client.connect(timeout_s) or \
+                not self._ready.wait(max(0.0, deadline - time.monotonic())):
+            raise ConnectionError(f"MQTT broker {self.cfg['host']}:"
+                                  f"{int(self.cfg.get('port', 1883))} not reachable")
 
     def publish(self, topic: str, payload):
-        data = (payload if isinstance(payload, (bytes, bytearray))
+        data = (bytes(payload) if isinstance(payload, (bytes, bytearray))
                 else json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode())
-        self._send(self._publish_packet(topic, data))
+        with self._lock:
+            if self._ready.is_set() and self.client.publish(topic, data, qos=0):
+                self._stats["published"] += 1
+                return
+            self._held[topic] = (time.monotonic(), data)
+            self._stats["held"] += 1
+        raise ConnectionError("MQTT session down; latest result held for replay")
 
     def publish_offline(self):
-        """Graceful shutdown: flip the retained status before closing."""
+        """Graceful shutdown: flip the retained status before closing.
+
+        Only sent on a live session; without one the broker has already
+        published the will (``offline``, retained) when the session dropped.
+        """
         if not self.status_topic:
             return
-        try:
-            self._send(self._publish_packet(self.status_topic, self.offline_payload, retain=True))
-        except OSError:
-            pass
+        with self._lock:
+            if self._ready.is_set():
+                self.client.publish(self.status_topic, self.offline_payload,
+                                    qos=0, retain=True)
 
     def close(self):
-        with self.lock:
-            if self.sock:
-                try:
-                    self.sock.sendall(b"\xe0\x00")  # DISCONNECT
-                    self.sock.close()
-                except OSError:
-                    pass
-                self.sock = None
+        """DISCONNECT (the broker then does not publish the will) and stop."""
+        self._ready.clear()
+        self.client.close()
+
+    def stats(self):
+        with self._lock:
+            return dict(self._stats, held_now=len(self._held),
+                        connected=self.client.connected)
 
 
 class PublishCycle:

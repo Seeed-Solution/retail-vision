@@ -170,7 +170,7 @@ def main(argv=None):
         print(f"[mqtt] connected, {status_topic(cfg['installation'])} = online (retained)",
               flush=True)
     except OSError as exc:
-        print(f"[mqtt] initial connect failed, will retry on publish: {exc}", flush=True)
+        print(f"[mqtt] initial connect failed, reconnecting in background: {exc}", flush=True)
 
     workers = [StreamWorker(cfg, s, publisher, backend)
                for s in cfg["streams"] if s.get("enabled", True)]

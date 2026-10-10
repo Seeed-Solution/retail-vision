@@ -1,0 +1,16 @@
+{
+ "message": {
+  "timestamp": 1760001002066,
+  "frame_id": 31,
+  "frame_width": 1280,
+  "frame_height": 720,
+  "fps": 15.0,
+  "inference_time_ms": 11.0,
+  "camera_id": "cam-a",
+  "source_backend": "golden_stub"
+ },
+ "errors": [
+  "missing zone",
+  "missing persons"
+ ]
+}

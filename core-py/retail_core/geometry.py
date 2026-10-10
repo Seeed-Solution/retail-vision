@@ -3,22 +3,16 @@
 Pure analytics logic: no inference SDK, no board library, no I/O.
 Behaviour authority is the reCamera C++ implementation at
 solutions/retail-vision/main/person_tracker.cpp
+
+``point_in_polygon`` is vision_base's ray-casting test (same edge rule and
+arithmetic; pinned by tests/fixtures/golden/math.json). The directed segment
+crossing used for entry/exit counting is retail policy and stays here.
 """
 from __future__ import annotations
 
+from vision_base.geom import point_in_polygon
 
-def point_in_polygon(px, py, polygon):
-    inside = False
-    n = len(polygon)
-    j = n - 1
-    for i in range(n):
-        xi, yi = polygon[i]
-        xj, yj = polygon[j]
-        if (yi > py) != (yj > py):
-            if px < (xj - xi) * (py - yi) / ((yj - yi) or 1e-12) + xi:
-                inside = not inside
-        j = i
-    return inside
+__all__ = ["point_in_polygon", "segment_crossing"]
 
 
 def _cross(ax, ay, bx, by, px, py):
@@ -36,5 +30,3 @@ def segment_crossing(ax, ay, bx, by, p0x, p0y, p1x, p1y):
     if (e0 > 0) == (e1 > 0):
         return 0
     return -1 if d0 > 0 else 1
-
-

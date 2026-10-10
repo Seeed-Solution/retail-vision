@@ -25,7 +25,7 @@ RUN mkdir -p /stage/plugins && cd /usr/lib/aarch64-linux-gnu/gstreamer-1.0 \
        done && ls -1 /stage/plugins
 
 # ---------------------------------------------------------------- core stage
-# Shared by every backend: GStreamer RTSP I/O, NumPy, and the retail_core
+# Shared by every backend: GStreamer RTSP I/O, NumPy, vision_base and the retail_core
 # package. Nothing here knows what an NPU is.
 FROM ${RUNTIME_BASE} AS core
 ARG MIRROR_SED
@@ -50,6 +50,7 @@ COPY --from=gstgir /stage/plugins/ /usr/lib/aarch64-linux-gnu/gstreamer-1.0/
 # boards this targets have under 2 GB of free disk.
 RUN pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" numpy==1.26.4
 WORKDIR /opt/retail-vision
+COPY core-py/vision_base ./vision_base
 COPY core-py/retail_core ./retail_core
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/opt/retail-vision:/usr/lib/python3/dist-packages \

@@ -179,6 +179,13 @@ so an "async" copy cannot overlap with compute.
 <installation>/retail-vision/status                online / offline, retained
 ```
 
+Everything is QoS 0. The status topic is the MQTT will (`offline`, retained) and
+`online` (retained) is published after every connect. During a broker outage
+the service keeps running and reconnects in the background with backoff
+(1 s doubling to 30 s). Results produced while disconnected are not queued:
+per camera only the latest result is held, and after reconnect it is published
+right after `online` only if it is at most 2 s old; anything older is dropped.
+
 ```json
 {
   "timestamp": 1709500000000, "frame_width": 1280, "frame_height": 720,
