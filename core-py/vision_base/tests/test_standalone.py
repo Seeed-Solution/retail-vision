@@ -152,3 +152,38 @@ def test_standalone_records_never_interleave():
     assert [o for o in objs if o["schema"] == "vb.status/1"]
     assert [o for o in objs if o["schema"] == "vb.frame/1"]
     assert not [l for l in out.splitlines() if not l.strip()]
+
+
+@pytest.mark.parametrize("section,key,value,expected", [
+    ("backend", "align", "top_left",
+     "backend.align: 'top_left' is not supported by this vb-runtime (only 'center')"),
+    ("backend", "nms_threshold", 0.5,
+     "backend.nms_threshold: 0.5 is not supported by this vb-runtime (only 0.45)"),
+    ("native", "jpeg_quality", 90,
+     "native.jpeg_quality: 90 is not supported by this vb-runtime (only 85)"),
+])
+def test_standalone_rejects_unsupported_value_at_startup(tmp_path, section, key,
+                                                         value, expected):
+    """Standalone mode does not go through vision_base.config.load, so the
+    native config path must refuse these values itself (same message)."""
+    cfg = json.loads(FIXTURE.read_text())
+    cfg.setdefault(section, {})[key] = value
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps(cfg))
+    proc = subprocess.run(
+        [BIN, "--standalone", "--config", str(p), "--output", "jsonl"],
+        capture_output=True, timeout=10.0)
+    assert proc.returncode != 0
+    assert expected in proc.stderr.decode()
+    assert proc.stdout == b""
+
+
+def test_standalone_accepts_supported_defaults(tmp_path):
+    cfg = json.loads(FIXTURE.read_text())
+    cfg["backend"].update({"align": "center", "nms_threshold": 0.45})
+    cfg.setdefault("native", {})["jpeg_quality"] = 85
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps(cfg))
+    rc, out, err = run_standalone(tmp_path, seconds=2.0, config=p)
+    assert rc == 0, err
+    assert parse_all(out)
