@@ -155,6 +155,13 @@ class FakeBroker:
 
     def _drop(self, conn: _Conn) -> None:
         conn.alive = False
+        # shutdown() first: close() alone does not wake the reader thread that
+        # is blocked in recv() on this socket, so on Linux no FIN reaches the
+        # client until that recv returns and the drop is never observed.
+        try:
+            conn.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         try:
             conn.sock.close()
         except OSError:
