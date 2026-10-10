@@ -565,26 +565,37 @@ class Shard:
 
     # ------------------------------------------------------------------ status
 
-    def runtime_status(self) -> dict:
+    def runtime_status(self, stats: dict | None = None) -> dict:
         """Native child process status for heartbeat/healthz (§6.9)."""
         from . import procstat
+        if stats is None:
+            stats = self.last_stats
         client = self._client
         alive = client is not None and client.proc is not None \
             and client.proc.poll() is None
         pid = client.pid if client is not None else None
         st = procstat.sample(pid) if pid else {"rss_kb": None, "cpu_s": None}
-        return {"pid": pid, "alive": bool(alive),
-                "failed": bool(self.runtime_failed and not alive),
-                "restarts": self.runtime_restarts,
-                "rss_kb": st["rss_kb"], "cpu_s": st["cpu_s"],
-                "version": self.hello.runtime_version if self.hello else "",
-                "backend": self.hello.backend if self.hello else ""}
+        out = {"pid": pid, "alive": bool(alive),
+               "failed": bool(self.runtime_failed and not alive),
+               "restarts": self.runtime_restarts,
+               "rss_kb": st["rss_kb"], "cpu_s": st["cpu_s"],
+               "version": self.hello.runtime_version if self.hello else "",
+               "backend": self.hello.backend if self.hello else ""}
+        # These values describe the cached native stats snapshot. Preserve
+        # their native types and omit them until the first stats record.
+        for key in ("effective_contexts", "stats_monotonic_ms", "stats_wall_ms",
+                    "stats_pid"):
+            if key in stats:
+                out[key] = stats[key]
+        return out
 
-    def status_streams(self) -> list[dict]:
+    def status_streams(self, stats: dict | None = None) -> list[dict]:
         """Full per-stream status entries (vb.status/1 stream items)."""
+        if stats is None:
+            stats = self.last_stats
         native: dict[int, dict] = {}
-        if isinstance(self.last_stats, dict):
-            for s in self.last_stats.get("streams") or []:
+        if isinstance(stats, dict):
+            for s in stats.get("streams") or []:
                 try:
                     native[int(s.get("stream_index", -1))] = s
                 except (TypeError, ValueError):
@@ -595,7 +606,7 @@ class Shard:
             if ctx is None:
                 continue
             st = native.get(idx, {})
-            out.append({
+            entry = {
                 "stream_id": ctx.stream_id,
                 "name": ctx.spec.name,
                 "state": ctx.last_state or "starting",
@@ -605,7 +616,16 @@ class Shard:
                 "score_threshold": ctx.spec.score_threshold,
                 "shard": self.index,
                 "hook_frames_dropped": self.hook_frames_dropped.get(idx, 0),
-            })
+            }
+            # Native stats are already expressed in the BASE health contract's
+            # units. Preserve optional telemetry verbatim; do not derive a
+            # percentile or substitute a zero when native stats are absent.
+            for key in ("processed_frames", "inference_ms_p50",
+                        "inference_ms_p95", "queue_delay_ms_p95",
+                        "dropped_frames", "rate_skipped"):
+                if key in st:
+                    entry[key] = st[key]
+            out.append(entry)
         return out
 
     def stream_status(self) -> list[dict]:

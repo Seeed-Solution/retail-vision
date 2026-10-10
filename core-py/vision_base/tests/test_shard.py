@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from vision_base.hooks import EchoApp
+from vision_base.hooks import EchoApp, StreamContext
 from vision_base.runtime_client import RuntimeGone
 from vision_base.shard import Shard
 from vision_base.types import StreamSpec
@@ -481,6 +481,78 @@ def test_set_threshold_survives_runtime_restart():
         shard.stop()
 
 
+def test_status_streams_preserves_native_telemetry_without_deriving_missing_values():
+    """Native stream stats reach health with their units and optionality intact."""
+    app = RecordingApp(snapshot=False)
+    pub = FakePublisher()
+    shard, old = make_shard(app, pub)
+    try:
+        ctx = StreamContext(0, StreamSpec("cam-0", "fake://"), runtime=None)
+        ctx.last_state = "running"
+        shard.contexts[0] = ctx
+        shard._active.add(0)
+        shard.last_stats = {"streams": [{
+            "stream_index": 0,
+            "fps": 12.5,
+            "decode": "nvdec",
+            "fallback_active": False,
+            "processed_frames": 7,
+            "inference_ms_p50": 12.5,
+            "inference_ms_p95": 18.75,
+            "queue_delay_ms_p95": 42.0,
+            "dropped_frames": 4,
+            "rate_skipped": 3,
+        }]}
+        status = shard.status_streams()[0]
+        assert status["processed_frames"] == 7
+        assert status["inference_ms_p50"] == 12.5
+        assert status["inference_ms_p95"] == 18.75
+        assert status["queue_delay_ms_p95"] == 42.0
+        assert status["dropped_frames"] == 4
+        assert status["rate_skipped"] == 3
+        assert status["decode"] == "nvdec"
+        assert status["fallback_active"] is False
+
+        shard.last_stats = {"streams": [{"stream_index": 0, "fps": 0.0}]}
+        missing = shard.status_streams()[0]
+        assert "inference_ms_p95" not in missing
+        assert "processed_frames" not in missing
+        assert "inference_ms_p50" not in missing
+        assert "queue_delay_ms_p95" not in missing
+        assert "dropped_frames" not in missing
+        assert "rate_skipped" not in missing
+        assert missing["decode"] == ""
+        assert missing["fallback_active"] is False
+    finally:
+        cleanup_env(old)
+        shard.stop()
+
+
+def test_runtime_status_preserves_native_snapshot_metadata():
+    app = RecordingApp(snapshot=False)
+    pub = FakePublisher()
+    shard, old = make_shard(app, pub)
+    try:
+        shard.last_stats = {"effective_contexts": 2,
+                            "stats_monotonic_ms": 1234,
+                            "stats_wall_ms": 1700000000123,
+                            "stats_pid": 9876}
+        status = shard.runtime_status()
+        assert status["effective_contexts"] == 2
+        assert status["stats_monotonic_ms"] == 1234
+        assert status["stats_wall_ms"] == 1700000000123
+        assert status["stats_pid"] == 9876
+        shard.last_stats = {}
+        missing = shard.runtime_status()
+        assert "effective_contexts" not in missing
+        assert "stats_monotonic_ms" not in missing
+        assert "stats_wall_ms" not in missing
+        assert "stats_pid" not in missing
+    finally:
+        cleanup_env(old)
+        shard.stop()
+
+
 def test_failed_add_releases_the_stream_id():
     """Review item 7: a rejected add must roll its registration back instead of
     reserving the stream_id forever."""
@@ -565,4 +637,3 @@ def test_shard_config_write_refuses_a_symlinked_path(tmp_path):
         shard.start()
     assert victim.read_text() == "untouched"
     assert not list(state.glob("*.tmp"))
-

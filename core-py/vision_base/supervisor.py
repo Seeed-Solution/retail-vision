@@ -100,73 +100,86 @@ class ShardWorker:
 
     def run(self, conn) -> None:
         a = self.args
-        try:
-            app = load_app(a["app_module"], a["config_dir"]) \
-                if a.get("app_module") else None
-            if app is None:
-                from .hooks import EchoApp
-                app = EchoApp()
-            if hasattr(app, "configure"):
-                app.configure(a.get("app_options") or {}, a.get("device_id", ""))
-        except Exception:
-            log.exception("app load failed in shard %s", a["index"])
-
-        client = MqttClient(a["mqtt_host"], a["mqtt_port"],
-                            client_id=a["client_id"],
-                            username=a.get("mqtt_username", ""),
-                            password=a.get("mqtt_password", ""),
-                            tls=bool(a.get("mqtt_tls", False)),
-                            ca_file=a.get("mqtt_ca_file", ""))
-        client.connect(timeout_s=5.0)      # no LWT on publish sessions (§5.4)
-        publisher = PublishWorker(client, queue_size=a.get("publish_queue", 256),
-                                  name=f"vb-publish-{a['index']}")
-        publisher.start()
-
-        shard = Shard(a["index"], app, publisher,
-                      runtime_argv=a["runtime_argv"],
-                      runtime_cfg=a["runtime_cfg"], state_dir=a["state_dir"],
-                      topic_root=a["topic_root"],
-                      restart_backoff_s=a.get("restart_backoff_s", 5.0),
-                      hello_timeout_s=a.get("hello_timeout_s", 10.0),
-                      open_timeout_s=a.get("open_timeout_s", 8.0))
-        shard.start()
-        for s in a.get("streams", []):
-            shard.add_stream(StreamSpec(**s))
-        _shard_send(conn, {"op": "started", "index": a["index"],
-                           "pid": os.getpid()})
-
+        app = None
+        client = None
+        publisher = None
+        shard = None
+        app_error = None
         stop = threading.Event()
-
-        def heartbeat():
-            while not stop.wait(1.0):
-                own = procstat.sample(os.getpid())
-                hb = {"op": "heartbeat", "index": a["index"],
-                      "pid": os.getpid(), "rss_kb": own["rss_kb"],
-                      "cpu_s": own["cpu_s"],
-                      "runtime": shard.runtime_status(),
-                      "mqtt": {"connected": client.connected,
-                               **publisher.stats()},
-                      "contexts": a.get("contexts", 1),
-                      "streams": shard.status_streams(),
-                      "hook_budget": shard.hook_budget_status()}
-                if shard.hello is not None:
-                    hb["hello"] = {"backend": shard.hello.backend,
-                                    "model_sha256": shard.hello.model_sha256,
-                                    "runtime_version": shard.hello.runtime_version,
-                                    "exclusive_device": bool(
-                                        shard.hello.caps.get("exclusive_device"))}
-                health_fn = getattr(app, "health", None)
-                if callable(health_fn):
-                    try:
-                        hb["app"] = validate_app_health(health_fn())
-                    except Exception as exc:
-                        hb["app"] = {"error": f"{type(exc).__name__}: {exc}"}
-                _shard_send(conn, hb)
-
-        threading.Thread(target=heartbeat, name=f"vb-hb-{a['index']}",
-                         daemon=True).start()
-
         try:
+            try:
+                app = load_app(a["app_module"], a["config_dir"]) \
+                    if a.get("app_module") else None
+                if app is None:
+                    from .hooks import EchoApp
+                    app = EchoApp()
+                if hasattr(app, "configure"):
+                    app.configure(a.get("app_options") or {}, a.get("device_id", ""))
+            except Exception as exc:
+                # Preserve the existing behavior: an app load/configure failure
+                # is logged, then shard startup continues with that app object.
+                app_error = {"error": f"{type(exc).__name__}: {exc}"}
+                log.exception("app load failed in shard %s", a["index"])
+
+            client = MqttClient(a["mqtt_host"], a["mqtt_port"],
+                                client_id=a["client_id"],
+                                username=a.get("mqtt_username", ""),
+                                password=a.get("mqtt_password", ""),
+                                tls=bool(a.get("mqtt_tls", False)),
+                                ca_file=a.get("mqtt_ca_file", ""))
+            client.connect(timeout_s=5.0)      # no LWT on publish sessions (§5.4)
+            publisher = PublishWorker(client, queue_size=a.get("publish_queue", 256),
+                                      name=f"vb-publish-{a['index']}")
+            publisher.start()
+
+            shard = Shard(a["index"], app, publisher,
+                          runtime_argv=a["runtime_argv"],
+                          runtime_cfg=a["runtime_cfg"], state_dir=a["state_dir"],
+                          topic_root=a["topic_root"],
+                          restart_backoff_s=a.get("restart_backoff_s", 5.0),
+                          hello_timeout_s=a.get("hello_timeout_s", 10.0),
+                          open_timeout_s=a.get("open_timeout_s", 8.0))
+            shard.start()
+            for s in a.get("streams", []):
+                shard.add_stream(StreamSpec(**s))
+            started = {"op": "started", "index": a["index"],
+                       "pid": os.getpid()}
+            if app_error is not None:
+                started["app_error"] = dict(app_error)
+            _shard_send(conn, started)
+
+            def heartbeat():
+                while not stop.wait(1.0):
+                    own = procstat.sample(os.getpid())
+                    native_stats = shard.last_stats
+                    hb = {"op": "heartbeat", "index": a["index"],
+                          "pid": os.getpid(), "rss_kb": own["rss_kb"],
+                          "cpu_s": own["cpu_s"],
+                          "runtime": shard.runtime_status(native_stats),
+                          "mqtt": {"connected": client.connected,
+                                   **publisher.stats()},
+                          "contexts": a.get("contexts", 1),
+                          "streams": shard.status_streams(native_stats),
+                          "hook_budget": shard.hook_budget_status()}
+                    if app_error is not None:
+                        hb["app_error"] = dict(app_error)
+                    if shard.hello is not None:
+                        hb["hello"] = {"backend": shard.hello.backend,
+                                        "model_sha256": shard.hello.model_sha256,
+                                        "runtime_version": shard.hello.runtime_version,
+                                        "exclusive_device": bool(
+                                            shard.hello.caps.get("exclusive_device"))}
+                    health_fn = getattr(app, "health", None)
+                    if callable(health_fn):
+                        try:
+                            hb["app"] = validate_app_health(health_fn())
+                        except Exception as exc:
+                            hb["app"] = {"error": f"{type(exc).__name__}: {exc}"}
+                    _shard_send(conn, hb)
+
+            threading.Thread(target=heartbeat, name=f"vb-hb-{a['index']}",
+                             daemon=True).start()
+
             while not stop.is_set():
                 try:
                     msg = conn.recv()
@@ -199,9 +212,18 @@ class ShardWorker:
                                    **reply})
         finally:
             stop.set()
-            shard.stop()
-            publisher.close()
-            client.close()
+            for owner, method in ((shard, "stop"), (app, "close"),
+                                  (publisher, "close"), (client, "close")):
+                if owner is None:
+                    continue
+                try:
+                    cleanup = getattr(owner, method, None)
+                    if not callable(cleanup):
+                        continue
+                    cleanup()
+                except Exception:
+                    log.exception("%s cleanup failed in shard %s", method,
+                                  a["index"])
 
 
 def shard_process_main(conn, args: dict) -> None:
@@ -700,6 +722,7 @@ class Supervisor:
                 "stream_ids": [s["stream_id"] for s in h.streams],
                 "runtime": rt, "mqtt": hb.get("mqtt") or {},
                 "app": hb.get("app"),
+                "app_error": hb.get("app_error"),
                 "hook_budget": hb.get("hook_budget"),
             })
         hello = self.hello or {}
