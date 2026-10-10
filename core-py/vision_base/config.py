@@ -146,11 +146,16 @@ def merge_plugins(config_plugins, app_plugins, *,
     return out
 
 
-# §6.2 built-in analyzer names (§6.6 streams[].options.analyzers validation, M1.20)
+# §6.2 built-in analyzer names (§6.6 streams[].options.analyzers validation, M1.20).
+# Must match create_analyzer() in core-cpp/vb/src/analyzers/plugin_loader.cpp:
+# a name accepted here but unknown to vb-runtime passes load() and then fails
+# every add, which the supervisor retries forever.
 BUILTIN_ANALYZERS = frozenset({
-    "line_cross", "zone", "slot_coverage", "stage2", "text_vote",
-    "dwell", "speed", "direction", "count_threshold", "pose_angle",
+    "line_cross", "zone", "dwell", "speed", "direction", "count_threshold",
+    "pose_angle",
 })
+# Named in BASE-1 §6.2 but not implemented by this vb-runtime.
+UNIMPLEMENTED_ANALYZERS = frozenset({"slot_coverage", "stage2", "text_vote"})
 
 
 def _check_options(options: dict, path: str) -> None:
@@ -186,6 +191,9 @@ def _check_options(options: dict, path: str) -> None:
             name = a.get("name")
             if not isinstance(name, str) or not name:
                 _err(f"{p}.name", "required")
+            if name in UNIMPLEMENTED_ANALYZERS:
+                _err(f"{p}.name", f"analyzer {name!r} is not implemented by "
+                     "this vb-runtime")
             if not (name in BUILTIN_ANALYZERS or name.startswith("plugin:")):
                 _err(f"{p}.name", f"unknown analyzer {name!r}")
             if "config" not in a:

@@ -115,6 +115,28 @@ def test_runtime_config_has_no_streams():
 
 
 
+
+@pytest.mark.parametrize("name", ["slot_coverage", "stage2", "text_vote"])
+def test_unimplemented_builtin_analyzer_is_rejected_at_load(tmp_path, name):
+    raw = json.loads((FIXTURES / "config_valid/full.json").read_text())
+    raw["streams"] = [{"stream_id": "cam", "url": "synthetic://0",
+                        "options": {"analyzers": [{"name": name, "config": {}}]}}]
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ConfigError, match=(
+            rf"streams\[0\]\.options\.analyzers\[0\]\.name: analyzer "
+            rf"'{name}' is not implemented by this vb-runtime")):
+        load(str(path))
+
+
+def test_builtin_analyzers_match_native_create_analyzer():
+    from vision_base.config import BUILTIN_ANALYZERS
+    src = (FIXTURES.parents[2] / "core-cpp/vb/src/analyzers/plugin_loader.cpp")
+    import re
+    body = src.read_text().split("create_analyzer(", 1)[1].split("\n}", 1)[0]
+    native = set(re.findall(r'name == "([a-z_]+)"', body))
+    assert native == set(BUILTIN_ANALYZERS)
+
 def test_runtime_config_uses_custom_open_timeout(tmp_path):
     raw = json.loads((FIXTURES / "config_valid" / "full.json").read_text())
     raw["runtime"]["open_timeout_s"] = 12.0
