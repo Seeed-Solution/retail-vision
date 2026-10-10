@@ -286,6 +286,11 @@ base image.
 In this repository the root `retail-vision` package ships `retail_core` only and
 depends on `vision-base`; `uv sync` installs `core-py/` as an editable path source.
 
+0.1.0 does not support a top-level `stage2` block or the decoder key
+`grid_center_activation`; `vision_base.config.load` rejects both. Configs that use
+them (for example edge-parking-vision's plate presets) need their vendored
+`vision_base` copy until a later release adds them.
+
 ## Acknowledgements
 
 - [Ultralytics](https://github.com/ultralytics/ultralytics) — the YOLO models every
