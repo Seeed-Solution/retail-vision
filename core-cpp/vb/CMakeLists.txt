@@ -218,6 +218,10 @@ if(VB_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/../../contracts/fixtures/vb
         $<TARGET_FILE:vb-runtime>)
 
+    add_executable(test_runtime_config tests/test_runtime_config.cpp)
+    target_link_libraries(test_runtime_config PRIVATE vb_core)
+    add_test(NAME runtime_config COMMAND test_runtime_config)
+
     add_executable(vb_wire_gen tools/vb_wire_gen.cpp)
     target_link_libraries(vb_wire_gen PRIVATE vb_core)
 

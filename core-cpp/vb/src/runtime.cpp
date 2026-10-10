@@ -170,6 +170,48 @@ bool has_so_suffix(const std::string& name) {
     return name.size() > 3 && name.compare(name.size() - 3, 3, ".so") == 0;
 }
 
+// vb.config/1 keeps backend.align, backend.nms_threshold and
+// native.jpeg_quality, but this runtime implements one value each: every
+// backend letterboxes with Align::Center, the pool runs NMS at 0.45 and
+// snapshots are encoded at quality 85. Reject anything else at startup
+// rather than run with a different setting than requested. Same messages as
+// vision_base/config.py; absent keys are accepted.
+std::string py_repr(const Json& v) {
+    if (v.is_string()) return "'" + v.get<std::string>() + "'";
+    return json_dump(v);
+}
+
+bool check_supported_values(const Json& j, std::string& err) {
+    const Json& backend = j.at("backend");
+    if (backend.is_object()) {
+        auto al = backend.find("align");
+        if (al != backend.end() && !al->is_null() &&
+            !(al->is_string() && al->get<std::string>() == "center")) {
+            err = "backend.align: " + py_repr(*al) +
+                  " is not supported by this vb-runtime (only 'center')";
+            return false;
+        }
+        auto nms = backend.find("nms_threshold");
+        if (nms != backend.end() && !nms->is_null() &&
+            !(nms->is_number() && nms->get<double>() == 0.45)) {
+            err = "backend.nms_threshold: " + py_repr(*nms) +
+                  " is not supported by this vb-runtime (only 0.45)";
+            return false;
+        }
+    }
+    auto native = j.find("native");
+    if (native != j.end() && native->is_object()) {
+        auto q = native->find("jpeg_quality");
+        if (q != native->end() && !q->is_null() &&
+            !(q->is_number() && q->get<double>() == 85.0)) {
+            err = "native.jpeg_quality: " + py_repr(*q) +
+                  " is not supported by this vb-runtime (only 85)";
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 // ---- RuntimeConfig ----
@@ -180,6 +222,7 @@ RuntimeConfig RuntimeConfig::from_json(const Json& j, std::string& err,
     try {
         if (!dev_config_from_json(j, allow_dev, c.dev, err)) return c;
         const Json& backend = j.at("backend");
+        if (!check_supported_values(j, err)) return c;
         c.backend_name = backend.at("name").get<std::string>();
         c.backend_json = json_dump(backend);
         auto read_int = [&](const char* key, int dflt) {
